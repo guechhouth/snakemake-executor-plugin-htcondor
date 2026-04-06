@@ -15,6 +15,7 @@ For the official documentation, visit [Snakemake plugin catalog](https://snakema
 - The job directive `threads` is used to set `request_cpu` command for HTCondor.
 - For the job status, this plugin reports the values of the [job ClassAd Attribute](https://htcondor.readthedocs.io/en/latest/classad-attributes/job-classad-attributes.html) `JobStatus`.
 - To determine whether a job was successful, this plugin relies on `htcondor.Schedd.history` (see [API reference](https://htcondor.readthedocs.io/en/latest/apis/python-bindings/api/htcondor.html)) and checks the values of the [job ClassAd Attribute](https://htcondor.readthedocs.io/en/latest/classad-attributes/job-classad-attributes.html) `ExitCode`.
+- **HTCondor Resource Field Units**: Fields that accept size units (such as `request_memory` and `request_disk`) support suffixes K, M, G, or T (optionally followed by B). These units are based on powers of 1024, so each step is 1024 times larger than the previous one (e.g., 1K = 1024 bytes, 1M = 1024 × 1024 bytes, 1G = 1024 × 1024 × 1024 bytes).
 
 The following [submit description file commands](https://htcondor.readthedocs.io/en/latest/man-pages/condor_submit.html) are supported (add them as user-defined resources):
 | Basic                              | Matchmaking      | Matchmaking (GPU)         | Policy                     |
@@ -236,6 +237,13 @@ cannot work, because Snakemake at the EP will attempt to find `../../my_data` on
 `my_data/`.
 
 ### Partially Shared Filesystems
+
+**Warning**: Before using partially shared filesystems, check with your HTCondor pool administrator about any limitations or constraints on the shared filesystem. Common considerations include:
+- Maximum number of files that can be stored
+- File access patterns (direct reads/writes vs. restricted access)
+- Storage quotas and retention policies
+- Performance characteristics and I/O limitations
+- Compatibility with your Snakemake workflow patterns
 
 In some computing environments, the Access Point and Execution Points may share certain filesystem paths (e.g., `/staging`) while other paths are local to each machine.
 The executor can be configured to recognize these shared paths and avoid transferring files that are already accessible on both the AP and EPs.
