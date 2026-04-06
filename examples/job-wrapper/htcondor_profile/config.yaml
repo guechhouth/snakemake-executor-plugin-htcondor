@@ -9,8 +9,9 @@ default-resources:
   # At a high level it starts up a Snakemake instance on each EP.
   job_wrapper: "wrapper.sh"
 
-  container_image: "'docker://jhiemstra/snakemake-dev-image:v1'"
-  universe: "container"
+  # Transfer the portable conda environment to each job on the EP
+  # Please input relative path of the portable environment from the submit directory
+  htcondor_transfer_input_files: "snakemake-workflow-env.tar.gz"
 
   request_disk: "4GB"
   request_memory: "1GB"
