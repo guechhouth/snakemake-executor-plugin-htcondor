@@ -164,3 +164,4 @@ poetry.lock
 # output paths generated in example/
 results/
 .snakemake/
+/examples/**/logs/
