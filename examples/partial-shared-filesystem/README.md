@@ -2,7 +2,7 @@
 
 An illustrative example demonstrating how to configure the HTCondor executor for a partially shared filesystem environment.
 
-**Note:** Unlike other examples, this example is not directly runnable. A partially-shared filesystem requires real cluster infrastructure - shared mount points like `/staging` must be set up by your cluster administrator and actually exist on both AP and EPs. Substitute the paths shown here with real shared paths on your cluster.
+**Note:** Unlike other examples, this example requires configuration for your specific HTCondor cluster. A partially-shared filesystem requires real cluster infrastructure - shared mount points like `/staging` must be set up by your cluster administrator and actually exist on both AP and EPs. Substitute the paths shown here with real shared paths on your cluster.
 
 **Operational warning:** Before enabling partial shared filesystem mode in production, confirm filesystem policies and limits with your storage or cluster administrator. In particular, verify constraints such as directory/file count limits, metadata performance, and whether direct read/write access patterns from AP and EPs are supported for your expected workload.
 

@@ -2,6 +2,19 @@
 
 A simple example demonstrating how Snakemake aggregates grouped resources in series (linear chain) and parallel (fan-out).
 
+## Files and Directories
+
+| File/Directory | Purpose |
+| --- | --- |
+| **README.md** | Documentation explaining grouped resources and both example patterns (fan-out and linear) |
+| **Snakefile.fanout** | Workflow demonstrating **parallel job execution** with a fan-out pattern (one input → three parallel analyses → combine results) |
+| **Snakefile.linear** | Workflow demonstrating **serial job execution** with a linear chain pattern (prepare → analyze → finalize in sequence) |
+| **wrapper.sh** | Job wrapper script executed by HTCondor before the actual job task; sets up the environment for job execution |
+| **htcondor_profile/** | Directory containing HTCondor executor configuration |
+| **htcondor_profile/config.yaml** | Profile configuration file with HTCondor executor settings and job submission parameters |
+| **inputs/** | Directory containing sample input data |
+| **inputs/raw.txt** | Sample input data file used by both Snakefile examples |
+
 ## How Grouped Resources Work
 
 Snakemake rules can be declared in groups that, when paired with an executor like HTCondor, indicate the rules should be run together as a single executor job. For HTCondor, this means that grouped rules/steps are not submitted as individual EP jobs, but as one set of jobs to be run together on a single EP. This is a useful tuning mechanism for smaller jobs, where scheduling overhead may limit throughput.
@@ -49,7 +62,7 @@ From the Snakefile in this folder, our workflow structure is:
                  │ rule prepare                │
                  │ Input:  data/raw.txt        │
                  │ Output: results/prepared.txt   │
-                 │ Mem: 2GB, Disk: 4GB         │
+                 │ Mem: 512MB, Disk: 1MB         │
                  └──────────────┬──────────────┘
                                 │
                                 ▼
@@ -60,7 +73,7 @@ From the Snakefile in this folder, our workflow structure is:
 │ │ analyze_part_a   │  │ analyze_part_b   │  │ analyze_part_c   │ │
 │ │ Input: prepared  │  │ Input: prepared  │  │ Input: prepared  │ │
 │ │ Output: part_a   │  │ Output: part_b   │  │ Output: part_c   │ │
-│ │ Mem: 4GB each    │  │ Mem: 4GB each    │  │ Mem: 4GB each    │ │
+│ │ Mem: 512MB each    │  │ Mem: 512MB each    │  │ Mem: 512MB each    │ │
 │ └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘ │
 │          │                     │                     │           │
 └──────────┼─────────────────────┼─────────────────────┼───────────┘
@@ -73,7 +86,7 @@ From the Snakefile in this folder, our workflow structure is:
         │ rule combine                                        │
         │ Input: part_a, part_b, part_c                       │
         │ Output: final_results.txt                           │
-        │ Mem: 2GB, Disk: 4GB                                 │
+        │ Mem: 512MB, Disk: 1MB                                 │
         └─────────────────────────────────────────────────────┘
 ```
 
@@ -83,9 +96,9 @@ From the Snakefile in this folder, our workflow structure is:
 
 For this fan-out workflow, Snakemake calculates resources by layer:
 
-- **Layer 1** (`prepare`): 2048 MB memory, 4096 MB disk
-- **Layer 2** (`analyze_part_a/b/c` in parallel): **sum** the three parallel jobs = 12288 MB memory, 6144 MB disk
-- **Layer 3** (`combine`): 2048 MB memory, 4096 MB disk
+- **Layer 1** (`prepare`): 512 MB memory, 1 MB disk
+- **Layer 2** (`analyze_part_a/b/c` in parallel): **sum** the three parallel jobs = 1536 MB memory, 3 MB disk
+- **Layer 3** (`combine`): 512 MB memory, 1 MB disk
 
 ### Linear Chain
 
@@ -97,7 +110,7 @@ For this fan-out workflow, Snakemake calculates resources by layer:
                  │ rule prepare                │
                  │ Input:  data/raw.txt        │
                  │ Output: results/prepared.txt│
-                 │ Mem: 2GB, Disk: 8GB         │
+                 │ Mem: 512MB, Disk: 1MB         │
                  └──────────────┬──────────────┘
                                 │
                                 ▼
@@ -106,7 +119,7 @@ For this fan-out workflow, Snakemake calculates resources by layer:
                  │ rule analyze                │
                  │ Input:  data/prepared.txt   │
                  │ Output: results/analyzed.txt│
-                 │ Mem: 8GB, Disk: 2GB         │
+                 │ Mem: 512MB, Disk: 1MB         │
                  └──────────────┬──────────────┘
                                 │
                                 ▼
@@ -115,14 +128,14 @@ For this fan-out workflow, Snakemake calculates resources by layer:
         │ rule finalize                                       │
         │ Input: results/analyzed.txt.                        │
         │ Output: results/linear/final_results.txt            │
-        │ Mem: 2GB, Disk: 4GB                                 │
+        │ Mem: 512MB, Disk: 1MB                                 │
         └─────────────────────────────────────────────────────┘
 ```
 
 When these rules are grouped as a linear chain (running in series), Snakemake takes the **max**:
 
-- Memory: max(2048, 8192, 2048) = **8192 MB → `request_memory = "8GB"`**
-- Disk: max(8192, 4096, 4096) = **8192 MB → `request_disk = "8388608"` (in KB)**
+- Memory: max(512, 512, 512) = **512 MB → `request_memory = "512MB"`**
+- Disk: max(1, 1, 1) = **1 MB → `request_disk = "1024"` (in KB)**
 
 ## The critical difference:
 

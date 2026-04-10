@@ -7,7 +7,7 @@ shared-fs-usage: none
 default-resources:
   # Required for the executor
   job_wrapper: "wrapper.sh"
-  container_image: "'docker://jhiemstra/snakemake-dev-image:v1'"
+  container_image: "docker://hub.opensciencegrid.org/htcondor/snakemake-tutorial:latest"
   universe: "container"
 
   threads: 1

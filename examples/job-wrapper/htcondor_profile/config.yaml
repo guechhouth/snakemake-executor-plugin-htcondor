@@ -13,8 +13,8 @@ default-resources:
   # Please input relative path of the portable environment from the submit directory
   htcondor_transfer_input_files: "snakemake-workflow-env.tar.gz"
 
-  request_disk: "4GB"
-  request_memory: "1GB"
+  request_disk: "1GB"
+  request_memory: "512MB"
   threads: 1
 
   # The resource types currently supported by the HTCondor Snakemake executor plugin are discussed

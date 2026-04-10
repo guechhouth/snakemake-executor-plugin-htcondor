@@ -7,8 +7,8 @@ rule prepare:
     output: "results/prepared.txt"  # This output is shared by all analyze_* rules
     group: "my_group"
     resources:
-        htcondor_request_mem_mb=2048,
-        htcondor_request_disk_mb=4096
+        htcondor_request_mem_mb=512,
+        htcondor_request_disk_mb=1
     shell: "cat {input} | sed 's/raw/prepared/' > {output}"
 
 # Layer 2: Three jobs run in PARALLEL
@@ -18,8 +18,8 @@ rule analyze_part_a:
     output: "results/part_a.txt"  # Different output
     group: "my_group"
     resources:
-        htcondor_request_mem_mb=4096,
-        htcondor_request_disk_mb=2048
+        htcondor_request_mem_mb=512,
+        htcondor_request_disk_mb=1
     shell: "cat {input} | sed 's/prepared/analyzed_a/' > {output}"
 ## Branch B
 rule analyze_part_b:
@@ -27,8 +27,8 @@ rule analyze_part_b:
     output: "results/part_b.txt"  # Different output
     group: "my_group"
     resources:
-        htcondor_request_mem_mb=4096,
-        htcondor_request_disk_mb=2048
+        htcondor_request_mem_mb=512,
+        htcondor_request_disk_mb=1
     shell: "cat {input} | sed 's/prepared/analyzed_b/' > {output}"
 ## Branch C
 rule analyze_part_c:
@@ -36,8 +36,8 @@ rule analyze_part_c:
     output: "results/part_c.txt"  # Different output
     group: "my_group"
     resources:
-        htcondor_request_mem_mb=4096,
-        htcondor_request_disk_mb=2048
+        htcondor_request_mem_mb=512,
+        htcondor_request_disk_mb=1
     shell: "cat {input} | sed 's/prepared/analyzed_c/' > {output}"
 
 # Layer 3: Combine results
@@ -46,6 +46,6 @@ rule combine:
     output: "results/fan-out/final_results.txt"
     group: "my_group"
     resources:
-        htcondor_request_mem_mb=2048,
-        htcondor_request_disk_mb=4096
+        htcondor_request_mem_mb=512,
+        htcondor_request_disk_mb=1
     shell: "for f in {input}; do cat $f; echo; done > {output}"

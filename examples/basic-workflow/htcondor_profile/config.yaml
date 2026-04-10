@@ -19,7 +19,7 @@ shared-fs-usage: none
 default-resources:
   # Required for the executor
   job_wrapper: "wrapper.sh"
-  container_image: "'docker://jhiemstra/snakemake-dev-image:v1'"
+  container_image: "docker://hub.opensciencegrid.org/htcondor/snakemake-tutorial:latest"
   universe: "container"
 
   # Using values that are needlessly larger than necessary for your jobs can lead to longer
@@ -27,8 +27,8 @@ default-resources:
   # to see exactly what resources were used by your jobs for fine-tuning.
   # HTCondor accepts MB/GB suffixes and interprets them as binary units
   # (MiB/GiB semantics), so 1GB = 1024 MiB.
-  request_disk: "4GB"
-  request_memory: "1GB"
+  request_disk: "1MB"
+  request_memory: "512MB"
   # Tell HTCondor how many CPUs your job needs (this correlate's to HTCondor's `request_cpus` parameter).
   threads: 1
 

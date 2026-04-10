@@ -1,6 +1,19 @@
 # Non-Shared Filesystem
 
-A simple example demonstrating how running Snakemake jobs on an HTCondor cluster without a shared filesystem works.
+A simple example demonstrating how running Snakemake jobs on an HTCondor cluster without a shared filesystem works. While other examples in this examples directory also disable Snakemake's shared filesystem assumptions, this example is meant to make this fact more explicit by discussing the extra steps involved in this setup.
+
+## Files and Directories
+
+| File/Directory | Purpose |
+| --- | --- |
+| **README.md** | Documentation explaining non-shared filesystems and how this example handles file transfers |
+| **Snakefile** | The workflow definition specifying the rules, inputs, outputs, and shell commands for the pipeline |
+| **wrapper.sh** | Job wrapper script executed by HTCondor before the actual job task; sets up the environment for job execution |
+| **htcondor_profile/** | Directory containing HTCondor executor configuration |
+| **htcondor_profile/config.yaml** | Profile configuration file with HTCondor executor settings, resource defaults, and file transfer configuration |
+| **inputs/** | Directory containing sample input files for the workflow |
+| **inputs/sample1.txt** | Sample input data file 1 |
+| **inputs/sample2.txt** | Sample input data file 2 |
 
 ## What Is a Shared Filesystem, and What Changes Without One?
 
@@ -43,6 +56,7 @@ A path like `../../my_data/` has no equivalent structure to preserve on the EP.
 
 - **Job Wrapper script:** set `$HOME` and the right shell environment before anything can run.
 - **A container (highly-recommend):** EP needs to at least have Python and Snakemake to execute the job(s). A container bundles Python + Snakemake + tools your rules use + your dependencies into a single portable image that HTCondor can bring along with the job.
+  Alternatively, you can use a **portable Python environment** instead of **container** as demonstrated in `examples/job-wrapper` and edit `wrapper.sh` and `htcondor_profile/config.yaml` accordingly.
 - **Correct directory structure:** Your entire workflow must live inside your submission directory and be referenced with downward relative paths. If anything lives above the submission directory, HTCondor can't transfer it and Snakemake will look for it in the wrong place on the EP.
 
 ## How This Example Works

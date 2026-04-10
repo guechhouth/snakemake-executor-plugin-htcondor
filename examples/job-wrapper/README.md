@@ -2,9 +2,23 @@
 
 A simple example demonstrating how Job Wrappers are used with HTCondor executor.
 
+## Files and Directories
+
+| File/Directory | Purpose |
+| --- | --- |
+| **README.md** | Documentation explaining job wrappers, why they're needed, and how this example uses them |
+| **Snakefile** | The workflow definition specifying the rules, inputs, outputs, and shell commands for the pipeline |
+| **wrapper.sh** | Job wrapper script executed by HTCondor before the actual job task; sets up the mamba/conda environment and working directory for job execution |
+| **htcondor_profile/** | Directory containing HTCondor executor configuration |
+| **htcondor_profile/config.yaml** | Profile configuration file with HTCondor executor settings and resource defaults |
+| **inputs/** | Directory containing sample input files for the workflow |
+| **inputs/sample1.txt** | Sample input data file 1 |
+| **inputs/sample2.txt** | Sample input data file 2 |
+
 ## Why Job Wrappers Are Needed
 
-HTCondor executes jobs in sandboxed environments on remote compute nodes. These nodes don't have access to the user's home directory, which breaks Snakemake's default behavior of writing cache files to `$HOME`.
+HTCondor executes jobs in sandboxed environments on remote compute nodes.
+These nodes don't have access to the user's home directory, which breaks Snakemake's default behavior of writing cache files to `$HOME`.
 
 The job wrapper solves this by:
 
@@ -15,37 +29,40 @@ The job wrapper solves this by:
 ### Some common scenarios where job wrapper script is needed:
 
 - The execution point (EP) does not have the right environment to execute and needs modules to be loaded. For example: miniconda (like this example)
-- You need to activate a conda environment before anything else runs
+- You need to activate a mamba/conda environment before anything else runs
 - `$HOME` is not set or is pointed to somewhere broken
 
 ### Some common scenarios where job wrapper script is not needed:
 
-- Your workflow uses containers
 - You use a shared file-system where the execution point (EP) already have the same environment as the access point (AP)
 - EPs already have everything pre-installed
+
+**Note on wrappers and containers**: This example demonstrates a non-container approach using a portable mamba/conda environment. If your workflow uses containers (as the `basic-workflow` or `grouped-jobs` examples do), you do not need a complex wrapper for environment setup as the container handles that automatically.
 
 ### Illustration
 
 ```text
+[HTCondor Access Point]
+        │
+        ▼
+HTCondor submits job with arguments
+        │
+        ▼
 [HTCondor Worker Node]
         │
         ▼
-┌─────────────────────────┐
-│   job_wrapper.sh        │  ← YOU write this (when needed)
-│   - module load conda   │    Sets up the environment
-│   - source activate env │
-│   - export HOME=$(pwd)  │
-│         │               │
-│         ▼               │
-│  [snakemake_job.sh]     │  ← Snakemake always generates this
-│  - run rule `foo`       │    Runs the actual rule
-│  - with input X         │
-│  - producing output Y   │
-└─────────────────────────┘
+┌──────────────────────────────────┐
+│   wrapper.sh                     │  ← Receives HTCondor arguments
+│   - module load conda            │    Sets up the environment
+│   - source activate env          │
+│   - export HOME=$(pwd)           │
+│   - snakemake "$@"               │  ← Passes arguments to Snakemake
+└──────────────────────────────────┘
+        │
+        ▼
+   Snakemake executes the rule
+   with those arguments
 ```
-
-**Notes:**
-Snakemake automatically generates a job script for each rule execution. The job wrapper is not a replacement for this. Instead, it is to ensure that the worker node environment is correctly configured before Snakemake's auto-generated script runs.
 
 ## How This Example Works
 
@@ -66,93 +83,58 @@ This example requires a portable conda environment. Create it with these 3 steps
 
 **Step 1: Create and pack the environment**
 
+You can use `conda` or `mamba`, we recommend `mamba` as it is much faster than `conda`.
+
 ```bash
-conda install -c conda-forge conda-pack
-conda create -n snakemake-workflow-env -c conda-forge python
-conda activate snakemake-workflow-env
+# Install `conda-pack` on your AP
+mamba install -c conda-forge conda-pack
+# Create environment name: snakemake-workflow-env
+mamba create -n snakemake-workflow-env -c conda-forge python
+# Activate the environment
+mamba activate snakemake-workflow-env
+# Install executor and Snakemake
 pip install snakemake snakemake-executor-plugin-htcondor
+# cd into the directory where you will be running your workflow
 cd /path/to/this/example/job-wrapper
-conda pack -n snakemake-workflow-env
-```
-
-**Step 2: Run the workflow**
-
-```bash
-snakemake --profile htcondor_profile
-```
-
-**Step 3: That's it!** The workflow will:
-
-- Submit jobs to HTCondor
-- Transfer the tar file to each execution point
-- Extract and activate the environment on each EP
-- Run Snakemake with the activated environment
-- Return results to the access point
-
-### Understanding the Portable Conda Environment (Optional Detailed Steps)
-
-This example uses a **portable conda environment** instead of containers.
-This approach is useful when EPs don't have the same environment as the AP, and you want to avoid container overhead.
-
-The Quick Start section above covers the full process. Below are detailed explanations for each step if you want to understand what's happening or customize the environment:
-
-#### Prerequisites
-
-1. Install `conda-pack` on your AP:
-
-```bash
-conda install -c conda-forge conda-pack
-```
-
-2. Create a Clean `conda` Environment
-
-```bash
-# environment name: snakemake-workflow-env
-conda create -n snakemake-workflow-env -c conda-forge python
-# activate the environment
-conda activate snakemake-workflow-env
-# install executor and Snakemake
-pip install snakemake snakemake-executor-plugin-htcondor
-```
-
-3. Pack the Environment
-
-```bash
-# step 1: cd into the directory where you will be running your workflow
-# step 2: pack the environment there. This creates snakemake-workflow-env.tar.gz (~191MB compressed)
-conda pack -n snakemake-workflow-env
-```
-
-4. Verify the File
-
-```bash
+mamba deactivate
+# Pack the environment there. This creates snakemake-workflow-env.tar.gz (~191MB compressed)
+conda-pack -n snakemake-workflow-env
+# Verify the files
 ls -sh snakemake-workflow-env.tar.gz
+# Make environment executable
 chmod 644 snakemake-workflow-env.tar.gz
 ```
 
-5. Update HTCondor Profile
-   In `htcondor_profile/config.yaml`, add these under `default-resources`:
+Refer to the [official CHTC website for more details on creating portable Python installations with Miniconda](https://chtc.cs.wisc.edu/uw-research-computing/conda-installation#4-check-size-of-conda-environment-tar-archive)
+
+**Step 2: Update HTCondor Profile and Wrapper Script**
+
+- Update HTCondor Profile
+  In `htcondor_profile/config.yaml`, add these under `default-resources`:
 
 ```yaml
 job_wrapper: "wrapper.sh"
 # relative path to submit directory
 htcondor_transfer_input_files: "snakemake-workflow-env.tar.gz"
-request_disk: "4GB"
-request_memory: "1GB"
+request_disk: "1GB"
+request_memory: "512MB"
 ```
 
-6. Update the wrapper script to include the environment. Refer to `wrapper.sh` for detailed explanations.
+- Update the wrapper script to include the environment. Refer to `wrapper.sh` for detailed explanations.
 
-**Note:** The `--dest-prefix` parameter is optional. Without it, the environment unpacks with `bin/`, `lib/`, etc. at the top level, which is simpler for job wrapper scripts.
+**Step 3: Run the workflow**
 
-Refer to the [official CHTC website for more details on creating portable Python installations with Miniconda](https://chtc.cs.wisc.edu/uw-research-computing/conda-installation#4-check-size-of-conda-environment-tar-archive)
+```bash
+snakemake --profile htcondor_profile
+```
 
-#### How Portable Conda Environment Works
+**Step 4: That's it!** The workflow will:
 
-1. **Transfer**: HTCondor transfers the tar file to each EP (via `htcondor_transfer_input_files` in `htcondor_profile/config.yaml`)
-1. **Extract**: The wrapper script extracts it: `tar -xzf snakemake-workflow-env.tar.gz`
-1. **Activate**: The wrapper activates the environment: `export PATH=$(pwd)/bin:$PATH`
-1. **Run**: Snakemake executes with the activated environment
+- Submit jobs to HTCondor
+- Transfer the tar file to each execution point (via `htcondor_transfer_input_files` in `htcondor_profile/config.yaml`)
+- Extract and activate the environment on each EP (`tar -xzf snakemake-workflow-env.tar.gz`)
+- Run Snakemake with the activated environment (wrapper script does: `export PATH=$(pwd)/bin:$PATH`)
+- Return results to the access point
 
 ### How to Run
 

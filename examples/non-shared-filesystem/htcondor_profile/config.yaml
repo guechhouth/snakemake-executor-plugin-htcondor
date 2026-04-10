@@ -17,11 +17,11 @@ default-resources:
   #
   # Note requirement for quotes around the image name
   # Put your own image here if you'd like to use a different one.
-  container_image: "'docker://jhiemstra/snakemake-dev-image:v1'"
+  container_image: "docker://hub.opensciencegrid.org/htcondor/snakemake-tutorial:latest"
   universe: "container"
 
-  request_disk: "4GB"
-  request_memory: "1GB"
+  request_disk: "1MB"
+  request_memory: "512MB"
   threads: 1
 
   # The resource types currently supported by the HTCondor Snakemake executor plugin are discussed
