@@ -1,0 +1,21 @@
+jobs: 2
+
+executor: htcondor
+
+shared-fs-usage: none
+
+default-resources:
+  # This is the HTCondor job wrapper script that gets used to launch each job on the EP.
+  # At a high level it starts up a Snakemake instance on each EP.
+  job_wrapper: "wrapper.sh"
+
+  # Transfer the portable conda environment to each job on the EP
+  # Please input relative path of the portable environment from the submit directory
+  htcondor_transfer_input_files: "snakemake-workflow-env.tar.gz"
+
+  request_disk: "1GB"
+  request_memory: "512MB"
+  threads: 1
+
+  # The resource types currently supported by the HTCondor Snakemake executor plugin are discussed
+  # here: https://github.com/htcondor/snakemake-executor-plugin-htcondor/blob/main/README.md
