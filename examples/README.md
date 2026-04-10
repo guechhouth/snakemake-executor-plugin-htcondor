@@ -33,10 +33,9 @@ conda activate snakemake-env
 
 Each example contains a profile/ directory with HTCondor executor settings. Navigate to any example folder and run:
 
-\`\`\`bash\`
+```bash
 cd examples/<example-name>
 snakemake --profile htcondor_profile
-
 ```
 
 The example on the `partially-shared filesystem` requires configuration changes based on your cluster's filesystem and resource setup. However, the README.md in the folder has useful information about this system and how you can set up an example to see how it works.
@@ -52,4 +51,6 @@ The example on the `partially-shared filesystem` requires configuration changes 
 | [partial-shared-filesystem](partial-shared-filesystem/) | Using shared filesystem prefixes |
 
 **Notes:** Detailed profile descriptions are available in `basic-workflow`
+
+```
 ```
