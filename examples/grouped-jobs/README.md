@@ -61,8 +61,8 @@ From the Snakefile in this folder, our workflow structure is:
                  ┌─────────────────────────────┐
                  │ rule prepare                │
                  │ Input:  data/raw.txt        │
-                 │ Output: results/prepared.txt   │
-                 │ Mem: 512MB, Disk: 1MB         │
+                 │ Output: results/prepared.txt│
+                 │ Mem: 512MB, Disk: 1MB       │
                  └──────────────┬──────────────┘
                                 │
                                 ▼
@@ -73,7 +73,7 @@ From the Snakefile in this folder, our workflow structure is:
 │ │ analyze_part_a   │  │ analyze_part_b   │  │ analyze_part_c   │ │
 │ │ Input: prepared  │  │ Input: prepared  │  │ Input: prepared  │ │
 │ │ Output: part_a   │  │ Output: part_b   │  │ Output: part_c   │ │
-│ │ Mem: 512MB each    │  │ Mem: 512MB each    │  │ Mem: 512MB each    │ │
+│ │ Mem: 512MB each  │  │ Mem: 512MB each  │  │ Mem: 512MB each  │ │
 │ └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘ │
 │          │                     │                     │           │
 └──────────┼─────────────────────┼─────────────────────┼───────────┘
@@ -86,7 +86,7 @@ From the Snakefile in this folder, our workflow structure is:
         │ rule combine                                        │
         │ Input: part_a, part_b, part_c                       │
         │ Output: final_results.txt                           │
-        │ Mem: 512MB, Disk: 1MB                                 │
+        │ Mem: 512MB, Disk: 1MB                               │
         └─────────────────────────────────────────────────────┘
 ```
 
@@ -110,7 +110,7 @@ For this fan-out workflow, Snakemake calculates resources by layer:
                  │ rule prepare                │
                  │ Input:  data/raw.txt        │
                  │ Output: results/prepared.txt│
-                 │ Mem: 512MB, Disk: 1MB         │
+                 │ Mem: 512MB, Disk: 1MB       │
                  └──────────────┬──────────────┘
                                 │
                                 ▼
@@ -119,7 +119,7 @@ For this fan-out workflow, Snakemake calculates resources by layer:
                  │ rule analyze                │
                  │ Input:  data/prepared.txt   │
                  │ Output: results/analyzed.txt│
-                 │ Mem: 512MB, Disk: 1MB         │
+                 │ Mem: 512MB, Disk: 1MB       │
                  └──────────────┬──────────────┘
                                 │
                                 ▼
@@ -128,7 +128,7 @@ For this fan-out workflow, Snakemake calculates resources by layer:
         │ rule finalize                                       │
         │ Input: results/analyzed.txt.                        │
         │ Output: results/linear/final_results.txt            │
-        │ Mem: 512MB, Disk: 1MB                                 │
+        │ Mem: 512MB, Disk: 1MB                               │
         └─────────────────────────────────────────────────────┘
 ```
 
