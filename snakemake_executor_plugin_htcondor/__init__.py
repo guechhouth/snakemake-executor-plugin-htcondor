@@ -178,11 +178,12 @@ class Executor(RemoteExecutor):
         if self.shared_fs_prefixes:
             self._validate_shared_fs_configuration()
 
-        # Dictionary to track JobEventLog readers for each submitted job.
-        # Key: external_jobid (ClusterId), Value: JobEventLog reader
-        # This approach avoids expensive schedd queries by reading local log files,
-        # similar to how DAGMan and condor_watch_q operate.
-        self._job_event_logs: Dict[int, JobEventLog] = {}
+        # Track all job events from a single unified log file
+        self._unified_event_log_reader: Optional[JobEventLog] = None
+
+        # Dictionary to track events as they are being read in _read_job_events
+        # so that they will not be lost
+        self._event_logs: Dict[int, list] = {}
 
         # Dictionary to track the latest known state for each job.
         # Key: external_jobid (ClusterId), Value: JobState dataclass
@@ -210,6 +211,9 @@ class Executor(RemoteExecutor):
 
         # Number of consecutive missing log checks before using fallback
         self._log_missing_threshold = 3
+
+        # Get the local universe management job clusterid
+        self.unified_log_file = join(self.jobDir, "snakemake-rules.log")
 
     def _validate_held_timeout(self):
         """Validate the held job timeout configuration.
@@ -1095,13 +1099,20 @@ class Executor(RemoteExecutor):
             transfer_output_remaps,
         ) = self._get_exec_args_and_transfer_files(job, needs_transfer)
 
+        # Get the rule name
+        rule_name = job.rule.name
+
+        # Create the directory for each step
+        rule_log_dir = join(self.jobDir, rule_name)
+        makedirs(rule_log_dir, exist_ok=True)
+
         # Creating submit dictionary which is passed to htcondor.Submit
         submit_dict = {
             "executable": job_exec,
             "arguments": job_args,
-            "log": join(self.jobDir, "$(ClusterId).log"),
-            "output": join(self.jobDir, "$(ClusterId).out"),
-            "error": join(self.jobDir, "$(ClusterId).err"),
+            "log": self.unified_log_file,  # all jobs write to same file
+            "output": join(rule_log_dir, f"{rule_name}-{job.jobid}_$(ClusterId).out"),
+            "error": join(rule_log_dir, f"{rule_name}-{job.jobid}_$(ClusterId).err"),
             "request_cpus": str(job.threads),
         }
 
@@ -1218,6 +1229,9 @@ class Executor(RemoteExecutor):
         for key in ["allowed_execute_duration", "allowed_job_duration", "retry_until"]:
             self._set_resources(submit_dict, job, key)
 
+        # checking the job submitted
+        self.logger.info(f"Setting batch_name: {job.name}-{job.jobid}")
+
         # Name the jobs in the queue something that tells us what the job is
         submit_dict["batch_name"] = f"{job.name}-{job.jobid}"
 
@@ -1254,23 +1268,8 @@ class Executor(RemoteExecutor):
             f"Job {job.jobid} submitted to "
             f"HTCondor Cluster ID {submit_result.cluster()}\n"
             f"The logs of the HTCondor job are stored "
-            f"in {self.jobDir}/{submit_result.cluster()}.log"
+            f"in {self.unified_log_file}"
         )
-
-        # Initialize the JobEventLog reader for this job.
-        # We do this at submission time so the reader is ready when we start checking.
-        cluster_id = submit_result.cluster()
-        log_path = join(self.jobDir, f"{cluster_id}.log")
-        try:
-            self._job_event_logs[cluster_id] = JobEventLog(log_path)
-            self.logger.debug(
-                f"Initialized JobEventLog reader for cluster {cluster_id}"
-            )
-        except Exception as e:
-            self.logger.warning(
-                f"Could not initialize JobEventLog for cluster {cluster_id}: {e}. "
-                "Will retry on first status check."
-            )
 
         self.report_job_submission(
             SubmittedJobInfo(job=job, external_jobid=submit_result.cluster())
@@ -1278,10 +1277,9 @@ class Executor(RemoteExecutor):
 
     def _get_job_event_log(self, cluster_id: int) -> Optional[JobEventLog]:
         """
-        Get or create a JobEventLog reader for the given cluster ID.
+        Get the inified JobEventLog reader
 
-        This method lazily initializes log readers if they weren't created at
-        submission time (e.g., if the log file wasn't ready yet).
+        All jobs write to a single log file regardless of the cluster_id
 
         Args:
             cluster_id: The HTCondor ClusterId for the job
@@ -1289,25 +1287,25 @@ class Executor(RemoteExecutor):
         Returns:
             JobEventLog reader, or None if the log file doesn't exist yet
         """
-        if cluster_id in self._job_event_logs:
-            return self._job_event_logs[cluster_id]
+        # Return the cached reader if it is already initialized
+        if self._unified_event_log_reader is not None:
+            return self._unified_event_log_reader
 
         # Try to create the reader now
-        log_path = join(self.jobDir, f"{cluster_id}.log")
-        if exists(log_path):
+        if exists(self.unified_log_file):
             try:
-                self._job_event_logs[cluster_id] = JobEventLog(log_path)
+                self._unified_event_log_reader = JobEventLog(self.unified_log_file)
                 self.logger.debug(
-                    f"Lazily initialized JobEventLog reader for cluster {cluster_id}"
+                    f"Lazily initialized JobEventLog reader from {self._unified_event_log_reader}"
                 )
-                return self._job_event_logs[cluster_id]
+                return self._unified_event_log_reader
             except Exception as e:
-                self.logger.warning(
-                    f"Could not initialize JobEventLog for cluster {cluster_id}: {e}"
-                )
+                self.logger.warning(f"Could not initialize unified JobEventLog: {e}")
                 return None
         else:
-            self.logger.debug(f"Log file not yet available for cluster {cluster_id}")
+            self.logger.debug(
+                f"Unified log file not yet available: {self.unified_log_file}"
+            )
             return None
 
     def _cleanup_job_tracking(self, cluster_id: int) -> None:
@@ -1321,8 +1319,8 @@ class Executor(RemoteExecutor):
             cluster_id: The HTCondor ClusterId for the job
         """
         # Remove the JobEventLog reader (closes file handle)
-        if cluster_id in self._job_event_logs:
-            del self._job_event_logs[cluster_id]
+        if cluster_id in self._event_logs:
+            del self._event_logs[cluster_id]
 
         # Remove cached job state
         if cluster_id in self._job_current_states:
@@ -1602,10 +1600,16 @@ class Executor(RemoteExecutor):
         current_state = self._job_current_states[cluster_id]
 
         try:
-            # Read all available NEW events without blocking (stop_after=0)
-            # This returns immediately with events since our last read
-            events_read = 0
+            # Get and organized all events by their cluster_id
             for event in event_log.events(stop_after=0):
+                clusterid = event.cluster
+                if clusterid not in self._event_logs:
+                    self._event_logs[clusterid] = []
+                self._event_logs[clusterid].append(event)
+
+            # Process only this cluster's events
+            events_read = 0
+            for event in self._event_logs.pop(cluster_id, []):
                 events_read += 1
                 event_type = event.type
 
