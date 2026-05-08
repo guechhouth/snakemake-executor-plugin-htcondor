@@ -42,24 +42,53 @@ requirements, you can override them per-rule using `resources:`
 
 ### Log files
 
-**HTCondor**
+#### HTCondor
 
-In `.snakemake`, you can find `htcondor` directory that contains `.err`, `.log`, and `.out` files. Each rule in a Snakefile generally produces a set of files (`.err`, `.log`, `.out`), with some exceptions such as that of grouped job.
+In `.snakemake/htcondor/`, you can find:
 
-- `.log` records significant events that occur during the lifetime of all jobs within a cluster. This is important to help us understand what happened to a job and to diagnose if any issues occurred while the job was running/trying to run.
-- `.out` is the standard output, which records "normal" messages.
-- `.err` is the standard error. which records error messages or additional information.
+- **`snakemake-rules.log`** (top level) — Unified event log containing all job events from all rules. It records significant events during the lifetime of all jobs (submit, execute, evict, terminate, etc.). This is important for understanding what happened to each job and diagnosing issues while the job was running/trying to run.
 
-All the outputs that would normally have been printed in the console are instead redirected to the appropriate `.out` or `.err` file.
+- **Per-rule directories** (e.g., `RuleName/`) — Each rule creates a subdirectory containing:
 
-**Note:** By default, HTCondor logs are stored in `.snakemake/htcondor/`. We recommend using `logs/` as the directory for your HTCondor logs. You can set it via:
+  - `RuleName-JobId_ClusterId.err` is the standard error output, which records error messages or additional information about the job.
+  - `RuleName-JobId_ClusterId.out` is the standard output, which records "normal" messages.
+
+**Example directory structure:**
+
+```
+.snakemake/htcondor/
+├── process/
+│   ├── process-1_1.err
+│   ├── process-1_1.out
+│   ├── process-2_2.err
+│   └── process-2_2.out
+├── snakemake-rules.log          (unified for all jobs)
+```
+
+All console outputs that would normally be printed is redirected to the appropriate `.out` or `.err` file.
+
+**Note:** By default, HTCondor logs are stored in `.snakemake/htcondor/`. You can set a custom directory via:
 
 - Command line flag: `snakemake --profile htcondor_profile --htcondor-jobdir logs/`
 - In `htcondor_profile/config.yaml`: `htcondor-jobdir: logs/`
 
-**Snakemake**
+**Example directory structure:**
 
-In addition to the HTCondor log, we also have the Snakemake's log file which can be found in `log` directory under `.snakemake`. The contents in the file is also printed to `Terminal`. This file contains the setups, job execution details and progress, warnings/errors, final status, and more. These are useful for understanding, troubleshooting, and inspecting the workflow that is being run.
+```
+.snakemake/
+.logs/
+├── process/
+│   ├── process-1_1.err
+│   ├── process-1_1.out
+│   ├── process-2_2.err
+│   └── process-2_2.out
+├── snakemake-rules.log
+```
+
+#### Snakemake
+
+In addition to the HTCondor log, we also have the Snakemake's log file which can be found in `log` directory under `.snakemake`.
+The contents in the file is also printed to `Terminal`. This file contains the setups, job execution details and progress, warnings/errors, final status, and more. These are useful for understanding, troubleshooting, and inspecting the workflow that is being run.
 
 ### How to Run
 
