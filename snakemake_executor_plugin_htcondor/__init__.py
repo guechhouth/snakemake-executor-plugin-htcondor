@@ -1604,6 +1604,8 @@ class Executor(RemoteExecutor):
                 return None
 
         try:
+            if not has_buffered_events:
+                self._drain_unified_log()
 
             # Process only this cluster's events
             events_read = 0
