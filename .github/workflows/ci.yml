@@ -64,7 +64,7 @@ jobs:
       - name: Check HTCondor errors
         run: |
           ls  /tmp/pytest-of-submituser/pytest-0/test_simple_workflow0/simple/.snakemake/htcondor
-          for file in /tmp/pytest-of-submituser/pytest-0/test_simple_workflow0/simple/.snakemake/htcondor/*.err; do cat "$file"; done
+          find /tmp/pytest-of-submituser/pytest-0/test_simple_workflow0/simple/.snakemake/htcondor -name "*.err" -exec cat {} \;
 
       - name: Run Coverage
         run: su -c "poetry run coverage report -m --omit=Snakefile" submituser

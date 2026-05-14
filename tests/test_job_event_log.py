@@ -7,6 +7,7 @@ and interprets job states, replacing the previous schedd query-based approach.
 
 import pytest
 import time
+from pathlib import Path
 from unittest.mock import Mock
 from htcondor2 import JobEventType
 from snakemake_executor_plugin_htcondor import Executor, JobStatus, JobState
@@ -17,29 +18,44 @@ from snakemake_executor_plugin_htcondor import Executor, JobStatus, JobState
 # ---------------------------------------------------------------------------
 
 
-def make_event(event_type, **kwargs):
+def make_event(event_type, cluster_id=None, **kwargs):
     """Create a mock HTCondor event with the given type and attributes."""
     event = Mock()
     event.type = event_type
+    # Add clusterid to new events
+    event.cluster = cluster_id
     event.get = Mock(side_effect=lambda k, d=None: kwargs.get(k, d))
     return event
 
 
-def make_mock_executor(**extra_attrs):
+def make_mock_executor(temp_dir=None, **extra_attrs):
     """
     Create a mock executor with the core methods bound.
 
+    Each executor gets its own isolated temporary directory to ensure test isolation.
+    Pass a Path object or string for temp_dir; if None, creates a new directory.
+
     Additional attributes (e.g. _held_timeout) can be passed as kwargs.
     """
+    if temp_dir is None:
+        temp_dir = Path.cwd() / "test_temp"
+        temp_dir.mkdir(exist_ok=True)
+    else:
+        if not isinstance(temp_dir, Path):
+            temp_dir = Path(temp_dir) if not isinstance(temp_dir, Path) else temp_dir
+
     executor = Mock(spec=Executor)
     executor.logger = Mock()
-    executor._job_event_logs = {}
     executor._job_current_states = {}
     executor._log_missing_counts = {}
-    executor.jobDir = "/tmp/test_htcondor"
+    executor.jobDir = str(temp_dir)
+    executor._event_logs = {}
+    executor._unified_event_log_reader = None
+    executor._unified_log_file = str(temp_dir / "snakemake-rules.log")
 
     for method_name in (
         "_read_job_events",
+        "_drain_unified_log",
         "_get_job_event_log",
         "_cleanup_job_tracking",
         "_try_read_job_log",
@@ -64,9 +80,16 @@ def make_mock_executor(**extra_attrs):
 
 def _setup_event_log(executor, cluster_id, events):
     """Attach a mock event log returning *events* to *executor*."""
-    mock_log = Mock()
-    mock_log.events = Mock(return_value=iter(events))
-    executor._job_event_logs[cluster_id] = mock_log
+    mock_unified_log = Mock()
+
+    # Mock the events() method to yield events with cluster attribute set
+    def events_generator(stop_after=0):
+        for event in events:
+            event.cluster = cluster_id
+            yield event
+
+    mock_unified_log.events = Mock(side_effect=events_generator)
+    executor._unified_event_log_reader = mock_unified_log
 
 
 # ---------------------------------------------------------------------------
@@ -76,13 +99,15 @@ class TestEventToStatusMapping:
     """Verify that each HTCondor event type produces the correct JobStatus."""
 
     @pytest.fixture
-    def executor(self):
-        return make_mock_executor()
+    def executor(self, tmp_path):
+        return make_mock_executor(temp_dir=tmp_path)
 
     # -- simple single-event tests -----------------------------------------
 
     def test_submit_sets_idle(self, executor):
         _setup_event_log(executor, 1, [make_event(JobEventType.SUBMIT)])
+        # Drain first before populating the events
+        executor._drain_unified_log()
         assert executor._read_job_events(1).status == JobStatus.IDLE
 
     def test_execute_sets_running(self, executor):
@@ -94,6 +119,8 @@ class TestEventToStatusMapping:
                 make_event(JobEventType.EXECUTE),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         assert executor._read_job_events(1).status == JobStatus.RUNNING
 
     def test_evicted_sets_idle(self, executor):
@@ -106,6 +133,8 @@ class TestEventToStatusMapping:
                 make_event(JobEventType.JOB_EVICTED),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         assert executor._read_job_events(1).status == JobStatus.IDLE
 
     def test_suspended_sets_suspended(self, executor):
@@ -118,6 +147,8 @@ class TestEventToStatusMapping:
                 make_event(JobEventType.JOB_SUSPENDED),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         assert executor._read_job_events(1).status == JobStatus.SUSPENDED
 
     def test_unsuspended_sets_running(self, executor):
@@ -131,6 +162,8 @@ class TestEventToStatusMapping:
                 make_event(JobEventType.JOB_UNSUSPENDED),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         assert executor._read_job_events(1).status == JobStatus.RUNNING
 
     def test_shadow_exception_sets_idle(self, executor):
@@ -143,6 +176,8 @@ class TestEventToStatusMapping:
                 make_event(JobEventType.SHADOW_EXCEPTION),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         assert executor._read_job_events(1).status == JobStatus.IDLE
 
     def test_reconnect_failed_sets_idle(self, executor):
@@ -155,6 +190,8 @@ class TestEventToStatusMapping:
                 make_event(JobEventType.JOB_RECONNECT_FAILED),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         assert executor._read_job_events(1).status == JobStatus.IDLE
 
     def test_reconnected_sets_running(self, executor):
@@ -168,6 +205,8 @@ class TestEventToStatusMapping:
                 make_event(JobEventType.JOB_RECONNECTED),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         assert executor._read_job_events(1).status == JobStatus.RUNNING
 
     def test_aborted_sets_removed(self, executor):
@@ -179,6 +218,8 @@ class TestEventToStatusMapping:
                 make_event(JobEventType.JOB_ABORTED),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         assert executor._read_job_events(1).status == JobStatus.REMOVED
 
     def test_file_transfer_sets_transferring_when_not_running(self, executor):
@@ -190,6 +231,8 @@ class TestEventToStatusMapping:
                 make_event(JobEventType.FILE_TRANSFER),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         assert executor._read_job_events(1).status == JobStatus.TRANSFERRING
 
     def test_file_transfer_does_not_override_running(self, executor):
@@ -202,6 +245,8 @@ class TestEventToStatusMapping:
                 make_event(JobEventType.FILE_TRANSFER),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         assert executor._read_job_events(1).status == JobStatus.RUNNING
 
     def test_image_size_does_not_change_status(self, executor):
@@ -214,6 +259,8 @@ class TestEventToStatusMapping:
                 make_event(JobEventType.IMAGE_SIZE),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         assert executor._read_job_events(1).status == JobStatus.RUNNING
 
     # -- terminated events with metadata -----------------------------------
@@ -230,6 +277,8 @@ class TestEventToStatusMapping:
                 ),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         result = executor._read_job_events(1)
         assert result.status == JobStatus.COMPLETED
         assert result.exit_code == 0
@@ -246,6 +295,8 @@ class TestEventToStatusMapping:
                 ),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         result = executor._read_job_events(1)
         assert result.status == JobStatus.COMPLETED
         assert result.exit_code == 42
@@ -265,6 +316,8 @@ class TestEventToStatusMapping:
                 ),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         result = executor._read_job_events(1)
         assert result.status == JobStatus.COMPLETED
         assert result.exit_by_signal is True
@@ -283,6 +336,9 @@ class TestEventToStatusMapping:
                 ),
             ],
         )
+
+        # Drain first before populating the events
+        executor._drain_unified_log()
         before = time.time()
         result = executor._read_job_events(1)
         after = time.time()
@@ -301,6 +357,11 @@ class TestEventToStatusMapping:
                 make_event(JobEventType.JOB_RELEASED),
             ],
         )
+
+        # Drain first before populating the events
+        executor._drain_unified_log()
+
+        # Read processes the buffered events
         result = executor._read_job_events(1)
         assert result.status == JobStatus.IDLE
         assert result.hold_reason is None
@@ -324,18 +385,21 @@ class TestStatePersistence:
         def events_gen(stop_after=0):
             call_count[0] += 1
             if call_count[0] == 1:
-                return iter(
-                    [
-                        make_event(JobEventType.SUBMIT),
-                        make_event(JobEventType.EXECUTE),
-                    ]
-                )
+                events = [
+                    make_event(JobEventType.SUBMIT),
+                    make_event(JobEventType.EXECUTE),
+                ]
+                for event in events:
+                    event.cluster = 1
+                return iter(events)
             return iter([])
 
         mock_log = Mock()
         mock_log.events = Mock(side_effect=events_gen)
-        executor._job_event_logs[1] = mock_log
+        executor._unified_event_log_reader = mock_log
 
+        # Drain first before populating the events
+        executor._drain_unified_log()
         assert executor._read_job_events(1).status == JobStatus.RUNNING
         assert executor._read_job_events(1).status == JobStatus.RUNNING
 
@@ -361,6 +425,9 @@ class TestStatePersistence:
         )
         _setup_event_log(executor, 1, [make_event(JobEventType.JOB_RELEASED)])
 
+        # Drain first before populating the events
+        executor._drain_unified_log()
+
         result = executor._read_job_events(1)
         assert result.status == JobStatus.IDLE
         assert result.hold_reason is None
@@ -373,8 +440,8 @@ class TestJobLifecycleScenarios:
     """End-to-end event sequences representing real HTCondor job lifecycles."""
 
     @pytest.fixture
-    def executor(self):
-        return make_mock_executor()
+    def executor(self, tmp_path):
+        return make_mock_executor(temp_dir=tmp_path)
 
     def test_preemption_and_reschedule(self, executor):
         """SUBMIT → EXECUTE → EVICTED → EXECUTE → TERMINATED"""
@@ -391,6 +458,9 @@ class TestJobLifecycleScenarios:
                 ),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
+
         result = executor._read_job_events(1)
         assert result.status == JobStatus.COMPLETED
         assert result.exit_code == 0
@@ -411,6 +481,9 @@ class TestJobLifecycleScenarios:
                 ),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
+
         result = executor._read_job_events(1)
         assert result.status == JobStatus.COMPLETED
         assert result.hold_reason is None
@@ -430,6 +503,9 @@ class TestJobLifecycleScenarios:
                 ),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
+
         assert executor._read_job_events(1).status == JobStatus.COMPLETED
 
 
@@ -486,9 +562,13 @@ class TestErrorHandlingAndCleanup:
         executor = make_mock_executor()
         executor._job_current_states[1] = JobState(status=JobStatus.RUNNING)
 
-        mock_log = Mock()
-        mock_log.events = Mock(side_effect=Exception("Read error"))
-        executor._job_event_logs[1] = mock_log
+        # Make _event_logs.pop raise inside the try block.
+        mock_event_logs = Mock()
+        mock_event_logs.__contains__ = Mock(
+            return_value=True
+        )  # skip _get_job_event_log() check
+        mock_event_logs.pop = Mock(side_effect=Exception("Read error"))
+        executor._event_logs = mock_event_logs
 
         assert executor._read_job_events(1) is None
         assert executor._job_current_states[1].status == JobStatus.RUNNING
@@ -496,7 +576,7 @@ class TestErrorHandlingAndCleanup:
 
     def test_missing_log_returns_none(self):
         executor = make_mock_executor(jobDir="/nonexistent/path")
-        assert executor._get_job_event_log(99999) is None
+        assert executor._get_job_event_log() is None
 
     def test_unavailable_log_returns_none_despite_cached_state(self):
         """_read_job_events must return None when the log can't be read,
@@ -513,18 +593,17 @@ class TestErrorHandlingAndCleanup:
     def test_existing_reader_is_reused(self):
         executor = make_mock_executor()
         sentinel = Mock()
-        executor._job_event_logs[1] = sentinel
-        assert executor._get_job_event_log(1) is sentinel
+        executor._unified_event_log_reader = sentinel
+        assert executor._get_job_event_log() is sentinel
 
     def test_cleanup_removes_all_tracking_data(self):
         executor = make_mock_executor()
-        executor._job_event_logs[1] = Mock()
+        executor._unified_event_log_reader = Mock()
         executor._job_current_states[1] = JobState(status=JobStatus.COMPLETED)
         executor._log_missing_counts[1] = 2
 
         executor._cleanup_job_tracking(1)
 
-        assert 1 not in executor._job_event_logs
         assert 1 not in executor._job_current_states
         assert 1 not in executor._log_missing_counts
 
@@ -536,8 +615,8 @@ class TestReportAndResolveJobState:
     """Verify that job states are correctly reported to Snakemake."""
 
     @pytest.fixture
-    def executor(self):
-        ex = make_mock_executor()
+    def executor(self, tmp_path):
+        ex = make_mock_executor(temp_dir=tmp_path)
         ex._report_and_resolve_job_state = (
             Executor._report_and_resolve_job_state.__get__(ex, Executor)
         )
@@ -670,8 +749,8 @@ class TestFallbackMechanism:
     """Fallback mechanism when log files are unavailable."""
 
     @pytest.fixture
-    def executor(self):
-        return make_mock_executor()
+    def executor(self, tmp_path):
+        return make_mock_executor(temp_dir=tmp_path)
 
     def test_htcondor_status_code_conversion(self, executor):
         expected = {
@@ -711,6 +790,8 @@ class TestFallbackMechanism:
                 make_event(JobEventType.EXECUTE),
             ],
         )
+        # Drain first before populating the events
+        executor._drain_unified_log()
         result = executor._try_read_job_log(1)
         assert result.status == JobStatus.RUNNING
         assert 1 not in executor._log_missing_counts

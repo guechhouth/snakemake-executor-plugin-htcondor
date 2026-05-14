@@ -178,11 +178,11 @@ class Executor(RemoteExecutor):
         if self.shared_fs_prefixes:
             self._validate_shared_fs_configuration()
 
-        # Dictionary to track JobEventLog readers for each submitted job.
-        # Key: external_jobid (ClusterId), Value: JobEventLog reader
-        # This approach avoids expensive schedd queries by reading local log files,
-        # similar to how DAGMan and condor_watch_q operate.
-        self._job_event_logs: Dict[int, JobEventLog] = {}
+        # Track all job events from a single unified log file
+        self._unified_event_log_reader: Optional[JobEventLog] = None
+
+        # Dictionary to track events as they are being read in _read_job_events so that they will not be lost
+        self._event_logs: Dict[int, list] = {}
 
         # Dictionary to track the latest known state for each job.
         # Key: external_jobid (ClusterId), Value: JobState dataclass
@@ -210,6 +210,9 @@ class Executor(RemoteExecutor):
 
         # Number of consecutive missing log checks before using fallback
         self._log_missing_threshold = 3
+
+        # Path to the unified log file that tracks all jobs submitted
+        self._unified_log_file = join(self.jobDir, "snakemake-rules.log")
 
     def _validate_held_timeout(self):
         """Validate the held job timeout configuration.
@@ -1095,13 +1098,20 @@ class Executor(RemoteExecutor):
             transfer_output_remaps,
         ) = self._get_exec_args_and_transfer_files(job, needs_transfer)
 
+        # Get the rule name
+        rule_name = job.name
+
+        # Create the directory for each step
+        rule_log_dir = join(self.jobDir, rule_name)
+        makedirs(rule_log_dir, exist_ok=True)
+
         # Creating submit dictionary which is passed to htcondor.Submit
         submit_dict = {
             "executable": job_exec,
             "arguments": job_args,
-            "log": join(self.jobDir, "$(ClusterId).log"),
-            "output": join(self.jobDir, "$(ClusterId).out"),
-            "error": join(self.jobDir, "$(ClusterId).err"),
+            "log": self._unified_log_file,  # all jobs write to same file
+            "output": join(rule_log_dir, f"{rule_name}-{job.jobid}_$(ClusterId).out"),
+            "error": join(rule_log_dir, f"{rule_name}-{job.jobid}_$(ClusterId).err"),
             "request_cpus": str(job.threads),
         }
 
@@ -1155,8 +1165,8 @@ class Executor(RemoteExecutor):
 
             if transfer_output_remaps:
                 self.logger.debug(f"Transfer output remaps: {transfer_output_remaps}")
-                submit_dict["transfer_output_remaps"] = "; ".join(
-                    transfer_output_remaps
+                submit_dict["transfer_output_remaps"] = (
+                    '"' + "; ".join(transfer_output_remaps) + '"'
                 )
 
         # Basic commands
@@ -1218,8 +1228,10 @@ class Executor(RemoteExecutor):
         for key in ["allowed_execute_duration", "allowed_job_duration", "retry_until"]:
             self._set_resources(submit_dict, job, key)
 
+        batch_name = f"{job.name}-{job.jobid}"
+
         # Name the jobs in the queue something that tells us what the job is
-        submit_dict["batch_name"] = f"{job.name}-{job.jobid}"
+        submit_dict["batch_name"] = batch_name
 
         # Check any custom classads
         for key in job.resources.keys():
@@ -1252,62 +1264,51 @@ class Executor(RemoteExecutor):
 
         self.logger.info(
             f"Job {job.jobid} submitted to "
-            f"HTCondor Cluster ID {submit_result.cluster()}\n"
+            f"HTCondor Cluster ID {submit_result.cluster()} with batch name {batch_name}\n"
             f"The logs of the HTCondor job are stored "
-            f"in {self.jobDir}/{submit_result.cluster()}.log"
+            f"in {self._unified_log_file}"
         )
-
-        # Initialize the JobEventLog reader for this job.
-        # We do this at submission time so the reader is ready when we start checking.
-        cluster_id = submit_result.cluster()
-        log_path = join(self.jobDir, f"{cluster_id}.log")
-        try:
-            self._job_event_logs[cluster_id] = JobEventLog(log_path)
-            self.logger.debug(
-                f"Initialized JobEventLog reader for cluster {cluster_id}"
-            )
-        except Exception as e:
-            self.logger.warning(
-                f"Could not initialize JobEventLog for cluster {cluster_id}: {e}. "
-                "Will retry on first status check."
-            )
 
         self.report_job_submission(
             SubmittedJobInfo(job=job, external_jobid=submit_result.cluster())
         )
 
-    def _get_job_event_log(self, cluster_id: int) -> Optional[JobEventLog]:
+    def _get_job_event_log(self) -> Optional[JobEventLog]:
         """
-        Get or create a JobEventLog reader for the given cluster ID.
+        Get the unified JobEventLog reader
 
-        This method lazily initializes log readers if they weren't created at
-        submission time (e.g., if the log file wasn't ready yet).
-
-        Args:
-            cluster_id: The HTCondor ClusterId for the job
+        All jobs write to a single log file regardless of the cluster_id
 
         Returns:
             JobEventLog reader, or None if the log file doesn't exist yet
         """
-        if cluster_id in self._job_event_logs:
-            return self._job_event_logs[cluster_id]
+        # Lazy initialization to ensure critical attributes exist
+        if not hasattr(self, "_unified_event_log_reader"):
+            self._unified_event_log_reader = None
+        if not hasattr(self, "_unified_log_file"):
+            self.jobDir = self.workflow.executor_settings.jobdir
+            makedirs(self.jobDir, exist_ok=True)
+            self._unified_log_file = join(self.jobDir, "snakemake-rules.log")
+
+        # Return the cached reader if it is already initialized
+        if self._unified_event_log_reader is not None:
+            return self._unified_event_log_reader
 
         # Try to create the reader now
-        log_path = join(self.jobDir, f"{cluster_id}.log")
-        if exists(log_path):
+        if exists(self._unified_log_file):
             try:
-                self._job_event_logs[cluster_id] = JobEventLog(log_path)
+                self._unified_event_log_reader = JobEventLog(self._unified_log_file)
                 self.logger.debug(
-                    f"Lazily initialized JobEventLog reader for cluster {cluster_id}"
+                    f"Lazily initialized JobEventLog reader from {self._unified_log_file}"
                 )
-                return self._job_event_logs[cluster_id]
+                return self._unified_event_log_reader
             except Exception as e:
-                self.logger.warning(
-                    f"Could not initialize JobEventLog for cluster {cluster_id}: {e}"
-                )
+                self.logger.warning(f"Could not initialize unified JobEventLog: {e}")
                 return None
         else:
-            self.logger.debug(f"Log file not yet available for cluster {cluster_id}")
+            self.logger.debug(
+                f"Unified log file not yet available: {self._unified_log_file}"
+            )
             return None
 
     def _cleanup_job_tracking(self, cluster_id: int) -> None:
@@ -1320,9 +1321,9 @@ class Executor(RemoteExecutor):
         Args:
             cluster_id: The HTCondor ClusterId for the job
         """
-        # Remove the JobEventLog reader (closes file handle)
-        if cluster_id in self._job_event_logs:
-            del self._job_event_logs[cluster_id]
+        # Remove buffered events for this completed job
+        if cluster_id in self._event_logs:
+            del self._event_logs[cluster_id]
 
         # Remove cached job state
         if cluster_id in self._job_current_states:
@@ -1563,21 +1564,16 @@ class Executor(RemoteExecutor):
 
     def _read_job_events(self, cluster_id: int) -> Optional[JobState]:
         """
-        Read all available events from a job's log file and determine its current state.
+        Process buffered events for a job and determine its current state.
 
-        This method reads events non-blockingly (stop_after=0) and updates the
-        tracked state for this job. Since JobEventLog readers maintain their position,
-        subsequent calls only read NEW events and we must track state across calls.
-
-        The key insight is that HTCondor log files are append-only and contain
-        the complete history of a job. We read all new events since our last
-        read and update the tracked state.
+        This method processes events that were pre-read and buffered by _drain_unified_log().
+        It maintains state across calls by tracking the latest known state for each job since the JobEventLog readers maintain cursor position.
 
         Args:
             cluster_id: The HTCondor ClusterId for the job
 
         Returns:
-            A JobState with current job state info, or None if we couldn't read the log.
+            A JobState with current job state info, or None if the log file isn't available.
         """
         # If job already reached a true terminal state, return cached result
         # immediately — no log access needed.
@@ -1586,14 +1582,6 @@ class Executor(RemoteExecutor):
         if cached is not None and cached.status.is_terminal():
             return cached
 
-        event_log = self._get_job_event_log(cluster_id)
-        if event_log is None:
-            # Can't read log - return None so _try_read_job_log knows the log
-            # is still unavailable and won't reset the missing counter.
-            # The cached state in _job_current_states is preserved and will be
-            # available when the log becomes readable again.
-            return None
-
         # Get or initialize the current state for this job
         # We persist state across calls because JobEventLog readers maintain position
         if cluster_id not in self._job_current_states:
@@ -1601,11 +1589,20 @@ class Executor(RemoteExecutor):
 
         current_state = self._job_current_states[cluster_id]
 
+        # Check if we have buffered events for this cluster
+        has_buffered_events = cluster_id in self._event_logs
+
+        # If no buffered events, check if the log file is available.
+        # If the log file doesn't exist yet, return None to signal fallback is needed.
+        if not has_buffered_events:
+            event_log = self._get_job_event_log()
+            if event_log is None:
+                # Log file not available
+                return None
         try:
-            # Read all available NEW events without blocking (stop_after=0)
-            # This returns immediately with events since our last read
+            # Process only this cluster's events
             events_read = 0
-            for event in event_log.events(stop_after=0):
+            for event in self._event_logs.pop(cluster_id, []):
                 events_read += 1
                 event_type = event.type
 
@@ -1771,6 +1768,7 @@ class Executor(RemoteExecutor):
                     f"Job {current_job.job.jobid} with HTCondor Cluster ID "
                     f"{cluster_id} was successful."
                 )
+
                 self.report_job_success(current_job)
             else:
                 self.logger.debug(
@@ -1875,97 +1873,139 @@ class Executor(RemoteExecutor):
         the current state. Terminal states (completed, removed) are cached
         to avoid re-reading finished jobs. Held jobs are monitored with a timeout.
         """
-        # Maps cluster_id -> SubmittedJobInfo for jobs needing fallback
-        jobs_needing_fallback: Dict[int, SubmittedJobInfo] = {}
 
-        # ========== PASS 1: Try log files for all jobs (fast) ==========
-        for current_job in active_jobs:
-            cluster_id = current_job.external_jobid
+        try:
+            # Drain the log
+            self._drain_unified_log()
 
-            try:
-                # Try to read from the job event log (fast, non-blocking)
-                job_state = self._try_read_job_log(cluster_id)
+            # Maps cluster_id -> SubmittedJobInfo for jobs needing fallback
+            jobs_needing_fallback: Dict[int, SubmittedJobInfo] = {}
 
-                if job_state is not None:
-                    # Got state from log - process it immediately
+            # ========== PASS 1: Try log files for all jobs (fast) ==========
+            for current_job in active_jobs:
+                cluster_id = current_job.external_jobid
+
+                try:
+                    # Try to read from the job event log (fast, non-blocking)
+                    job_state = self._try_read_job_log(cluster_id)
+
+                    if job_state is not None:
+                        # Got state from log - process it immediately
+                        result = self._report_and_resolve_job_state(
+                            current_job, job_state
+                        )
+                        if result is not None:
+                            yield result
+                    else:
+                        # Log not available - check if we need fallback
+                        if self._needs_fallback(cluster_id):
+                            # Collect for batch fallback query
+                            jobs_needing_fallback[cluster_id] = current_job
+                        else:
+                            # Still waiting for log to appear - assume active
+                            self.logger.debug(
+                                f"Log file for cluster {cluster_id} not yet available "
+                                f"(attempt {self._log_missing_counts.get(cluster_id, 0)}/"
+                                f"{self._log_missing_threshold})"
+                            )
+                            yield current_job
+
+                except Exception as e:
+                    self.logger.warning(
+                        f"Error checking job {current_job.job.jobid} with "
+                        f"HTCondor Cluster ID {cluster_id}: {e}"
+                    )
+                    # Assume job is still running and retry next time
+                    yield current_job
+
+            # ========== PASS 2: Batch fallback for remaining jobs ==========
+            if not jobs_needing_fallback:
+                return
+
+            self.logger.info(
+                f"Using batch fallback for {len(jobs_needing_fallback)} jobs "
+                f"with unavailable log files: {list(jobs_needing_fallback.keys())}"
+            )
+
+            # Step 2a: Batch query schedd for all jobs needing fallback
+            cluster_ids_to_query = list(jobs_needing_fallback.keys())
+            schedd_results = self._batch_query_schedd(cluster_ids_to_query)
+
+            # Process jobs found in schedd
+            jobs_not_in_schedd: Dict[int, SubmittedJobInfo] = {}
+            for cluster_id, current_job in jobs_needing_fallback.items():
+                if cluster_id in schedd_results:
+                    job_state = schedd_results[cluster_id]
+                    # Update cached state
+                    self._job_current_states[cluster_id] = job_state
                     result = self._report_and_resolve_job_state(current_job, job_state)
                     if result is not None:
                         yield result
                 else:
-                    # Log not available - check if we need fallback
-                    if self._needs_fallback(cluster_id):
-                        # Collect for batch fallback query
-                        jobs_needing_fallback[cluster_id] = current_job
-                    else:
-                        # Still waiting for log to appear - assume active
-                        self.logger.debug(
-                            f"Log file for cluster {cluster_id} not yet available "
-                            f"(attempt {self._log_missing_counts.get(cluster_id, 0)}/"
-                            f"{self._log_missing_threshold})"
-                        )
-                        yield current_job
+                    # Not in schedd - need to check history
+                    jobs_not_in_schedd[cluster_id] = current_job
 
-            except Exception as e:
-                self.logger.warning(
-                    f"Error checking job {current_job.job.jobid} with "
-                    f"HTCondor Cluster ID {cluster_id}: {e}"
-                )
-                # Assume job is still running and retry next time
-                yield current_job
+            # Step 2b: Batch query history for jobs not in schedd
+            if not jobs_not_in_schedd:
+                return
 
-        # ========== PASS 2: Batch fallback for remaining jobs ==========
-        if not jobs_needing_fallback:
+            cluster_ids_for_history = list(jobs_not_in_schedd.keys())
+            history_results = self._batch_query_history(cluster_ids_for_history)
+
+            # Process jobs found in history
+            for cluster_id, current_job in jobs_not_in_schedd.items():
+                if cluster_id in history_results:
+                    job_state = history_results[cluster_id]
+                    # Update cached state
+                    self._job_current_states[cluster_id] = job_state
+                    result = self._report_and_resolve_job_state(current_job, job_state)
+                    if result is not None:
+                        yield result
+                else:
+                    # Job not found anywhere - keep monitoring.
+                    # This could be a transient error (e.g., schedd was briefly
+                    # unreachable), so we don't report the job as lost yet.
+                    self.logger.warning(
+                        f"Job {current_job.job.jobid} with HTCondor Cluster ID "
+                        f"{cluster_id} could not be found in log files, schedd, or "
+                        "history. Keeping job active in case this is transient."
+                    )
+                    yield current_job
+
+        except Exception as e:
+            self.logger.error(
+                f"CRITICAL ERROR in check_active_jobs: {e}", exc_info=True
+            )
+            raise
+
+    def _drain_unified_log(self):
+        """
+        Read all new events from the unified log file and buffer them by cluster_id.
+
+        This method centralizes the expensive log-reading operation by pulling all new events
+        once at the start of check_active_jobs(), before the per-job processing loop, which
+        will distribute the cost fairly across all jobs.
+
+        Events are organized by cluster_id and buffered in self._event_logs for efficient processing by _read_job_events().
+        The JobEventLog cursor maintains its position, so subsequent calls to this method
+        only read NEW events appended since the last read.
+
+        """
+        # Get the event log
+        event_log = self._get_job_event_log()
+
+        # Check to prevent crashing
+        if event_log is None:
             return
 
-        self.logger.info(
-            f"Using batch fallback for {len(jobs_needing_fallback)} jobs "
-            f"with unavailable log files: {list(jobs_needing_fallback.keys())}"
-        )
-
-        # Step 2a: Batch query schedd for all jobs needing fallback
-        cluster_ids_to_query = list(jobs_needing_fallback.keys())
-        schedd_results = self._batch_query_schedd(cluster_ids_to_query)
-
-        # Process jobs found in schedd
-        jobs_not_in_schedd: Dict[int, SubmittedJobInfo] = {}
-        for cluster_id, current_job in jobs_needing_fallback.items():
-            if cluster_id in schedd_results:
-                job_state = schedd_results[cluster_id]
-                # Update cached state
-                self._job_current_states[cluster_id] = job_state
-                result = self._report_and_resolve_job_state(current_job, job_state)
-                if result is not None:
-                    yield result
-            else:
-                # Not in schedd - need to check history
-                jobs_not_in_schedd[cluster_id] = current_job
-
-        # Step 2b: Batch query history for jobs not in schedd
-        if not jobs_not_in_schedd:
-            return
-
-        cluster_ids_for_history = list(jobs_not_in_schedd.keys())
-        history_results = self._batch_query_history(cluster_ids_for_history)
-
-        # Process jobs found in history
-        for cluster_id, current_job in jobs_not_in_schedd.items():
-            if cluster_id in history_results:
-                job_state = history_results[cluster_id]
-                # Update cached state
-                self._job_current_states[cluster_id] = job_state
-                result = self._report_and_resolve_job_state(current_job, job_state)
-                if result is not None:
-                    yield result
-            else:
-                # Job not found anywhere - keep monitoring.
-                # This could be a transient error (e.g., schedd was briefly
-                # unreachable), so we don't report the job as lost yet.
-                self.logger.warning(
-                    f"Job {current_job.job.jobid} with HTCondor Cluster ID "
-                    f"{cluster_id} could not be found in log files, schedd, or "
-                    "history. Keeping job active in case this is transient."
-                )
-                yield current_job
+        # Get and organized all new events by their cluster_id
+        for event in event_log.events(stop_after=0):
+            clusterid = event.cluster
+            if clusterid not in self._event_logs:
+                # Initialize
+                self._event_logs[clusterid] = []
+            # Append to existing job
+            self._event_logs[clusterid].append(event)
 
     def cancel_jobs(self, active_jobs: List[SubmittedJobInfo]):
         # Cancel all active jobs.
@@ -1980,3 +2020,12 @@ class Executor(RemoteExecutor):
                 schedd.act(htcondor.JobAction.Remove, job_ids)
             except Exception as e:
                 self.logger.warning(f"Failed to cancel HTCondor jobs: {e}")
+
+        # Close the unified event log reader to release the OS file descriptor
+        if self._unified_event_log_reader is not None:
+            try:
+                self._unified_event_log_reader.close()
+            except Exception as e:
+                self.logger.warning(f"Failed to close unified event log reader: {e}")
+            finally:
+                self._unified_event_log_reader = None
