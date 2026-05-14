@@ -7,6 +7,7 @@ and interprets job states, replacing the previous schedd query-based approach.
 
 import pytest
 import time
+from pathlib import Path
 from unittest.mock import Mock
 from htcondor2 import JobEventType
 from snakemake_executor_plugin_htcondor import Executor, JobStatus, JobState
@@ -27,20 +28,30 @@ def make_event(event_type, cluster_id=None, **kwargs):
     return event
 
 
-def make_mock_executor(**extra_attrs):
+def make_mock_executor(temp_dir=None, **extra_attrs):
     """
     Create a mock executor with the core methods bound.
 
+    Each executor gets its own isolated temporary directory to ensure test isolation.
+    Pass a Path object or string for temp_dir; if None, creates a new directory.
+
     Additional attributes (e.g. _held_timeout) can be passed as kwargs.
     """
+    if temp_dir is None:
+        temp_dir = Path.cwd() / "test_temp"
+        temp_dir.mkdir(exist_ok=True)
+    else:
+        if not isinstance(temp_dir, Path):
+            temp_dir = Path(temp_dir) if not isinstance(temp_dir, Path) else temp_dir
+
     executor = Mock(spec=Executor)
     executor.logger = Mock()
     executor._job_current_states = {}
     executor._log_missing_counts = {}
-    executor.jobDir = "/tmp/test_htcondor"
+    executor.jobDir = str(temp_dir)
     executor._event_logs = {}
     executor._unified_event_log_reader = None
-    executor._unified_log_file = "/tmp/test_htcondor/snakemake-rules.log"
+    executor._unified_log_file = str(temp_dir / "snakemake-rules.log")
 
     for method_name in (
         "_read_job_events",
@@ -88,8 +99,8 @@ class TestEventToStatusMapping:
     """Verify that each HTCondor event type produces the correct JobStatus."""
 
     @pytest.fixture
-    def executor(self):
-        return make_mock_executor()
+    def executor(self, tmp_path):
+        return make_mock_executor(temp_dir=tmp_path)
 
     # -- simple single-event tests -----------------------------------------
 
@@ -429,8 +440,8 @@ class TestJobLifecycleScenarios:
     """End-to-end event sequences representing real HTCondor job lifecycles."""
 
     @pytest.fixture
-    def executor(self):
-        return make_mock_executor()
+    def executor(self, tmp_path):
+        return make_mock_executor(temp_dir=tmp_path)
 
     def test_preemption_and_reschedule(self, executor):
         """SUBMIT → EXECUTE → EVICTED → EXECUTE → TERMINATED"""
@@ -551,9 +562,13 @@ class TestErrorHandlingAndCleanup:
         executor = make_mock_executor()
         executor._job_current_states[1] = JobState(status=JobStatus.RUNNING)
 
-        mock_log = Mock()
-        mock_log.events = Mock(side_effect=Exception("Read error"))
-        executor._unified_event_log_reader = mock_log
+        # Make _event_logs.pop raise inside the try block.
+        mock_event_logs = Mock()
+        mock_event_logs.__contains__ = Mock(
+            return_value=True
+        )  # skip _get_job_event_log() check
+        mock_event_logs.pop = Mock(side_effect=Exception("Read error"))
+        executor._event_logs = mock_event_logs
 
         assert executor._read_job_events(1) is None
         assert executor._job_current_states[1].status == JobStatus.RUNNING
@@ -600,8 +615,8 @@ class TestReportAndResolveJobState:
     """Verify that job states are correctly reported to Snakemake."""
 
     @pytest.fixture
-    def executor(self):
-        ex = make_mock_executor()
+    def executor(self, tmp_path):
+        ex = make_mock_executor(temp_dir=tmp_path)
         ex._report_and_resolve_job_state = (
             Executor._report_and_resolve_job_state.__get__(ex, Executor)
         )
@@ -734,8 +749,8 @@ class TestFallbackMechanism:
     """Fallback mechanism when log files are unavailable."""
 
     @pytest.fixture
-    def executor(self):
-        return make_mock_executor()
+    def executor(self, tmp_path):
+        return make_mock_executor(temp_dir=tmp_path)
 
     def test_htcondor_status_code_conversion(self, executor):
         expected = {

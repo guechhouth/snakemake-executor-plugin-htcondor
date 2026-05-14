@@ -1279,9 +1279,6 @@ class Executor(RemoteExecutor):
 
         All jobs write to a single log file regardless of the cluster_id
 
-        Args:
-            cluster_id: The HTCondor ClusterId for the job
-
         Returns:
             JobEventLog reader, or None if the log file doesn't exist yet
         """
@@ -1602,11 +1599,7 @@ class Executor(RemoteExecutor):
             if event_log is None:
                 # Log file not available
                 return None
-
         try:
-            if not has_buffered_events:
-                self._drain_unified_log()
-
             # Process only this cluster's events
             events_read = 0
             for event in self._event_logs.pop(cluster_id, []):
