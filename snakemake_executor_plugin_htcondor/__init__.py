@@ -1165,8 +1165,8 @@ class Executor(RemoteExecutor):
 
             if transfer_output_remaps:
                 self.logger.debug(f"Transfer output remaps: {transfer_output_remaps}")
-                submit_dict["transfer_output_remaps"] = "; ".join(
-                    transfer_output_remaps
+                submit_dict["transfer_output_remaps"] = (
+                    '"' + "; ".join(transfer_output_remaps) + '"'
                 )
 
         # Basic commands
