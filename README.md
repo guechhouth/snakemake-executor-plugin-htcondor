@@ -18,17 +18,19 @@ For the official documentation, visit [Snakemake plugin catalog](https://snakema
 - **HTCondor Resource Field Units**: Fields that accept size units (such as `request_memory` and `request_disk`) support suffixes K, M, G, or T (optionally followed by B). These units are based on powers of 1024, so each step is 1024 times larger than the previous one (e.g., 1K = 1024 bytes, 1M = 1024 × 1024 bytes, 1G = 1024 × 1024 × 1024 bytes).
 
 The following [submit description file commands](https://htcondor.readthedocs.io/en/latest/man-pages/condor_submit.html) are supported (add them as user-defined resources):
-| Basic                              | Matchmaking      | Matchmaking (GPU)         | Policy                     |
-| ---------------------------------- | ---------------- | ------------------------- | -------------------------- |
-| `getenv`                           | `rank`           | `request_gpus`            | `max_retries`              |
-| `environment`                      | `request_disk`   | `require_gpus`            | `allowed_execute_duration` |
-| `input`                            | `request_memory` | `gpus_minimum_capability` | `allowed_job_duration`     |
-| `max_materialize`                  | `requirements`   | `gpus_minimum_memory`     | `retry_until`              |
-| `max_idle`                         | `classad_<foo>`**| `gpus_minimum_runtime`    |                            |
-| `job_wrapper`*                     |                  | `cuda_version`            |                            |
-| `universe`                         |                  |                           |                            |
-| `htcondor_transfer_input_files`*** |                  |                           |                            |
-| `htcondor_transfer_output_files`***|                  |                           |                            |
+| Basic                               | Matchmaking      | Matchmaking (GPU)         | Policy                     |
+| ----------------------------------  | ---------------- | ------------------------- | -------------------------- |
+| `getenv`                            | `rank`           | `request_gpus`            | `max_retries`              |
+| `environment`                       | `request_disk`   | `require_gpus`            | `allowed_execute_duration` |
+| `input`                             | `request_memory` | `gpus_minimum_capability` | `allowed_job_duration`     |
+| `max_materialize`                   | `requirements`   | `gpus_minimum_memory`     | `retry_until`              |
+| `max_idle`                          | `classad_<foo>`**| `gpus_minimum_runtime`    |                            |
+| `job_wrapper`*                      |                  | `cuda_version`            |                            |
+| `universe`                          |                  |                           |                            |
+| `stream_output`***                  |                  |                           |                            |
+| `stream_error`***                   |                  |                           |                            |
+| `htcondor_transfer_input_files`**** |                  |                           |                            |
+| `htcondor_transfer_output_files`****|                  |                           |                            |
 
 Additionally, the following **executor-specific resources** are available with explicit units (see [Resources with Explicit Units](#resources-with-explicit-units) below):
 | Resource                      | Description                           | Equivalent HTCondor Command |
@@ -55,7 +57,13 @@ snakemake "$@"
 \*\* Custom ClassAds can be defined using the `classad_` prefix as a custom job resource. For example, to define the ClassAd `+MyClassAd`, define `classad_MyClassAd` in
 the job's resources.
 
-\*\*\* Additional input or output files for transfer can be specified using `htcondor_transfer_input_files` and `htcondor_transfer_output_files` resources.
+\*\*\* For testing or debugging one or two jobs **at a time**. Do **not** use for many simultaneous jobs!
+Streaming the job's standard out and standard error may be useful to monitor a job's progress while it runs on the execution point.
+However, **be aware** that for high-concurrency/high-throughput workflows, this streaming can be very costly and may be detrimental not only to your own jobs, but to the entire shared computing resource.
+Misusing these attributes is a good way to catch your system administrator's attention and have your HTCondor access blocked!
+If you feel the need to stream standard out and standard error to monitor jobs for potential bugs, do this only on a small testing subset of your final workflow and _not_ on large runs.
+
+\*\*\*\* Additional input or output files for transfer can be specified using `htcondor_transfer_input_files` and `htcondor_transfer_output_files` resources.
 These are useful for transferring files that aren't part of the rule's `input:`/`output:` directives (e.g., helper scripts, configuration files, logs, intermediate results).
 Supports both string (comma-separated) and list formats. Wildcards (e.g., `{sample}`) are expanded for individual jobs, but **not** for grouped jobs since the resources are defined at the group level.
 Files on shared filesystem prefixes are automatically excluded from transfer.

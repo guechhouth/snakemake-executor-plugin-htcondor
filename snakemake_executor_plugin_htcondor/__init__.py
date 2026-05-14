@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, AsyncGenerator, Optional, Dict
+from typing import List, Any, AsyncGenerator, Optional, Dict, Callable
 import time
 from snakemake_interface_executor_plugins.executors.base import SubmittedJobInfo
 from snakemake_interface_executor_plugins.executors.remote import RemoteExecutor
@@ -20,6 +20,8 @@ from os.path import join, isabs, relpath, normpath, exists
 from os import makedirs, sep
 import re
 import sys
+
+LogSpec = tuple[Callable[[str], None], str]
 
 
 class JobStatus(Enum):
@@ -1063,8 +1065,13 @@ class Executor(RemoteExecutor):
         )
 
     def _set_resources(
-        self, submit_dict: dict, job: JobExecutorInterface, key: str, default=None
-    ):
+        self,
+        submit_dict: dict[str, Any],
+        job: JobExecutorInterface,
+        key: str,
+        default: Any = None,
+        logger: Optional[LogSpec] = None,
+    ) -> None:
         """
         Set submit_dict[key] from the job resources so that false values are correctly handled
 
@@ -1073,11 +1080,17 @@ class Executor(RemoteExecutor):
             job: The Snakemake job being prepared for submission
             key: The resource attribute name to extract and set
             default: Value to use if resource is not defined
+            logger: Optional tuple of (logger_method, message)
 
         """
         value = job.resources.get(key)
         if value is not None:
             submit_dict[key] = value
+
+            if logger is not None and value != default:
+                logger_method, message = logger
+                logger_method(message)
+
         elif default is not None:
             submit_dict[key] = default
 
@@ -1171,8 +1184,27 @@ class Executor(RemoteExecutor):
 
         # Basic commands
         self._set_resources(submit_dict, job, "getenv", default=False)
-
         self._set_resources(submit_dict, job, "preserve_relative_paths", default=True)
+        self._set_resources(
+            submit_dict,
+            job,
+            "stream_output",
+            logger=(
+                self.logger.warning,
+                "Setting HTCondor stream_output may significantly impact performance "
+                "in high-throughput workflows.",
+            ),
+        )
+        self._set_resources(
+            submit_dict,
+            job,
+            "stream_error",
+            logger=(
+                self.logger.warning,
+                "Setting HTCondor stream_error may significantly impact performance "
+                "in high-throughput workflows.",
+            ),
+        )
 
         # Build the HTCondor environment string by merging:
         #   1. Snakemake-managed env vars (storage plugin tokens, etc.) from self.envvars()
