@@ -33,6 +33,7 @@ jobs:
 
       - name: Install Python and more yum
         run: |
+          yum install -y sqlite sqlite-devel
           yum install -y python${{ env.PYTHON_VERSION }}
           yum install -y python${{ env.PYTHON_VERSION }}-pip
           yum install -y python${{ env.PYTHON_VERSION }}-devel
