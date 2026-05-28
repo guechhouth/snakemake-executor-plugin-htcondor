@@ -55,6 +55,16 @@ snakemake "$@"
 \*\* Custom ClassAds can be defined using the `classad_` prefix as a custom job resource. For example, to define the ClassAd `+MyClassAd`, define `classad_MyClassAd` in
 the job's resources.
 
+\*\* The plugin also supports the `htcondor_submit_` resource prefix to pass
+raw HTCondor submit attributes through to the submit description (set per-rule
+in the `Snakefile` or in a profile). For example:
+- `htcondor_submit_output_destination` -> `output_destination`
+- `htcondor_submit_MY__SendCredential` -> `MY.SendCredential` (use double underscore to represent `.`)
+
+Behavior mirrors `classad_`: string values are quoted; non-string values (ints, bools) are passed through unchanged.
+lists and dicts may not serialize to valid HTCondor submit/ClassAd values.
+Consider validation or serialization if you plan to use complex types.
+
 \*\*\* Additional input or output files for transfer can be specified using `htcondor_transfer_input_files` and `htcondor_transfer_output_files` resources.
 These are useful for transferring files that aren't part of the rule's `input:`/`output:` directives (e.g., helper scripts, configuration files, logs, intermediate results).
 Supports both string (comma-separated) and list formats. Wildcards (e.g., `{sample}`) are expanded for individual jobs, but **not** for grouped jobs since the resources are defined at the group level.
