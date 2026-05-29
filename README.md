@@ -57,7 +57,7 @@ snakemake "$@"
 \*\* Custom ClassAds can be defined using the `classad_` prefix as a custom job resource. For example, to define the ClassAd `+MyClassAd`, define `classad_MyClassAd` in
 the job's resources.
 
-\*\*\* For testing or debugging one or two jobs **at a time**. Do **not** use for many simultaneous jobs!
+\*\*\* `stream_output` and `stream_error` are for testing or debugging one or two jobs **at a time**. Do **not** use for many simultaneous jobs!
 Streaming the job's standard out and standard error may be useful to monitor a job's progress while it runs on the execution point.
 However, **be aware** that for high-concurrency/high-throughput workflows, this streaming can be very costly and may be detrimental not only to your own jobs, but to the entire shared computing resource.
 Misusing these attributes is a good way to catch your system administrator's attention and have your HTCondor access blocked!
