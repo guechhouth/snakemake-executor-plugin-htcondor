@@ -2,7 +2,10 @@
 Shared test fixtures and utilities for HTCondor executor tests.
 """
 
-from unittest.mock import Mock
+from contextlib import contextmanager
+from unittest.mock import Mock, patch
+
+import snakemake_executor_plugin_htcondor as plugin
 from snakemake_executor_plugin_htcondor import Executor
 
 
@@ -34,6 +37,54 @@ def create_mock_executor(shared_fs_prefixes=None):
     executor._parse_file_list = Executor._parse_file_list.__get__(executor, Executor)
 
     return executor
+
+
+def create_mock_submit_executor(tmp_path):
+    """Create a mock executor configured for run_job submit tests."""
+    executor = create_mock_executor()
+    executor.jobDir = str(tmp_path / "jobs")
+    executor.workflow = Mock()
+    executor.workflow.storage_settings.shared_fs_usage = False
+    executor.workflow.executor_settings = Mock()
+    executor.workflow.executor_settings.output_destination = None
+    executor.envvars = Mock(return_value={})
+    executor.report_job_submission = Mock()
+    executor._unified_log_file = str(tmp_path / "snakemake-rules.log")
+
+    executor.run_job = Executor.run_job.__get__(executor, Executor)
+    executor._set_resources = Executor._set_resources.__get__(executor, Executor)
+
+    executor._get_exec_args_and_transfer_files = Mock(
+        return_value=("python", "-m snakemake --cores 1", [], [], [])
+    )
+    executor._handle_explicit_unit_resources = Mock()
+    executor._log_resource_requests = Mock()
+    return executor
+
+
+@contextmanager
+def mock_htcondor_submission(captured_submit_dict):
+    """Patch HTCondor submission objects and capture the submit dict."""
+
+    class FakeSubmitResult:
+        def cluster(self):
+            return 12345
+
+    class FakeSubmit:
+        def __init__(self, submit_dict):
+            captured_submit_dict.update(submit_dict)
+
+        def issue_credentials(self):
+            return None
+
+    class FakeSchedd:
+        def submit(self, submit_description):
+            return FakeSubmitResult()
+
+    with patch.object(plugin.htcondor, "Submit", FakeSubmit), patch.object(
+        plugin.htcondor, "Schedd", FakeSchedd
+    ):
+        yield
 
 
 def create_mock_individual_job(

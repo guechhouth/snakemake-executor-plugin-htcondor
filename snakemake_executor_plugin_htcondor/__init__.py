@@ -1243,15 +1243,20 @@ class Executor(RemoteExecutor):
                     submit_dict[classad_key] = f'"{value}"'
                 else:
                     submit_dict[classad_key] = value
-            if key.startswith("htcondor_submit_"):
+            elif key.startswith("htcondor_submit_"):
                 raw_attri = key.removeprefix("htcondor_submit_")
-                # Replace underscore with dot to unescape
+                # Replace double underscore with dot to unescape
                 attri_name = raw_attri.replace("__", ".")
                 value = job.resources.get(key)
-                if isinstance(value, str):
-                    submit_dict[attri_name] = f'"{value}"'  # string literal
+                val = f'"{value}"' if isinstance(value, str) else value
+                # Raw htcondor_submit_* attributes should not override
+                # values the executor already set.
+                if attri_name in submit_dict:
+                    self.logger.debug(
+                        f"Skipping htcondor_submit_{raw_attri} override of {attri_name}"
+                    )
                 else:
-                    submit_dict[attri_name] = value
+                    submit_dict[attri_name] = val
 
         # Log resource requests with human-readable units
         self._log_resource_requests(submit_dict)
