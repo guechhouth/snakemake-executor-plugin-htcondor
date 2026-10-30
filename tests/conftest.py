@@ -53,6 +53,7 @@ def create_mock_submit_executor(tmp_path):
     executor.report_job_submission = Mock()
     executor._unified_log_file = str(tmp_path / "snakemake-rules.log")
     executor._metadata_file = None
+    executor._mgmt_id = None
 
     executor.run_job = Executor.run_job.__get__(executor, Executor)
     executor._set_resources = Executor._set_resources.__get__(executor, Executor)
@@ -130,6 +131,7 @@ def create_mock_individual_job(
     job.rule = Mock()
     job.rule.script = script
     job.rule.notebook = notebook
+    job.rule.basedir = None
 
     # Setup resources
     def resource_get(key, default=None):

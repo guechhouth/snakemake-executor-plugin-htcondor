@@ -17,11 +17,11 @@ import htcondor2 as htcondor
 from htcondor2 import JobEventLog, JobEventType
 import classad2 as classad
 import traceback
-from os.path import join, isabs, relpath, normpath, exists
+from os.path import join, isabs, relpath, normpath, exists, isdir
 from os import makedirs, sep
+import os
 import re
 import sys
-import os
 import json
 
 LogSpec = tuple[Callable[[str], None], str]
@@ -207,8 +207,11 @@ class Executor(RemoteExecutor):
         # Track all job events from a single unified log file
         self._unified_event_log_reader: Optional[JobEventLog] = None
 
-        # Dictionary to track events as they are being read in _read_job_events so that they will not be lost
-        self._event_logs: Dict[int, list] = {}
+        # Dictionary to track events as they are being read in _read_job_events
+        # so that they will not be lost. RemoteExecutor starts its status thread
+        # before calling __post_init__, so preserve a buffer that the thread may
+        # already have initialized in _drain_unified_log.
+        self._event_logs: Dict[int, list] = self.__dict__.setdefault("_event_logs", {})
 
         # Dictionary to track the latest known state for each job.
         # Key: external_jobid (ClusterId), Value: JobState dataclass
@@ -241,6 +244,8 @@ class Executor(RemoteExecutor):
         self._unified_log_file = join(self.jobDir, "snakemake-rules.log")
 
         # Get mgmt_id from _condor_job_ad env variable if it exists (local universe job)
+        self._mgmt_id = None
+
         job_ad_path = os.environ.get("_CONDOR_JOB_AD")
         if job_ad_path:
             try:
@@ -263,6 +268,11 @@ class Executor(RemoteExecutor):
             self._initialize_metadata(self._mgmt_id)
             self._publish_metadata_path()
             self.logger.info(f"HTCondor metadata file: {self._metadata_file}")
+
+        if self._mgmt_id is not None:
+            htcondor.Schedd().edit(
+                f"ClusterId == {self._mgmt_id}", "SnakeMgmtPID", os.getpid()
+            )
 
     def _resolve_metadata_file(self, setting: Optional[str]) -> Optional[str]:
         """
@@ -667,27 +677,85 @@ class Executor(RemoteExecutor):
 
     def _format_htcondor_environment(self, envvars: dict) -> str:
         """
-        Serialize a dict of environment variables to HTCondor's new-style
-        environment string format.
+        Serialize a dict of environment variables to an HTCondor new-syntax
+        environment *body* (the space-separated ``NAME=value`` assignments that
+        go *inside* the outer double quotes).
 
-        HTCondor new-style format places each assignment as KEY="value",
-        separated by spaces.  Double-quote characters inside a value are
-        escaped by doubling them (e.g. a value containing '"' becomes '""').
+        HTCondor's new environment syntax requires the entire environment value
+        to be wrapped in double quotes; the caller (run_job) adds those outer
+        quotes once, around the combined body.  Within that body:
 
-        Example output: 'SNAKEMAKE_STORAGE_S3_REGION="us-east-1" FOO="bar"'
+        * Assignments are ``NAME=value`` separated by single spaces.
+        * A literal double quote in a value is written as ``""``.
+        * A literal single quote in a value is written as ``''`` -- but this is
+          only interpreted as a literal quote *inside* a single-quoted section.
+        * A value containing whitespace OR a single quote must therefore be
+          wrapped in single quotes: whitespace so the space is not parsed as a
+          delimiter, and a single quote so its doubled ``''`` lands inside a
+          single-quoted section (otherwise it reads as an empty section and the
+          quote is dropped).
+
+        Example body: ``SNAKEMAKE_STORAGE_S3_REGION=us-east-1 GREETING='hi there'``
+        which the caller wraps as ``"SNAKEMAKE_STORAGE_S3_REGION=us-east-1 ...``"``.
+
+        NOTE: the previous implementation emitted ``KEY="value"`` per variable
+        but never added the outer quotes, so HTCondor fell back to *old* syntax
+        and delivered values wrapped in literal double quotes (and broke on
+        values containing spaces).
 
         Args:
             envvars: Dict mapping variable names to their string values.
 
         Returns:
-            HTCondor new-style environment string, ready to assign to the
-            ``environment`` key in an htcondor.Submit dict.
+            HTCondor new-syntax environment body (no outer quotes).
         """
         parts = []
         for k, v in envvars.items():
-            v_escaped = str(v).replace('"', '""')
-            parts.append(f'{k}="{v_escaped}"')
+            s = str(v)
+            # Double-quotes and single-quotes are escaped by doubling them.
+            escaped = s.replace('"', '""').replace("'", "''")
+            # The value must be wrapped in single quotes when it contains
+            # whitespace (so the space is not parsed as a separator between
+            # assignments) OR a single quote (the doubled '' is only interpreted
+            # as a literal quote *inside* a single-quoted section; left unwrapped
+            # it would be read as an empty section and the quote dropped).
+            if any(ch.isspace() for ch in s) or "'" in s:
+                escaped = f"'{escaped}'"
+            parts.append(f"{k}={escaped}")
         return " ".join(parts)
+
+    def _assemble_environment(self, snakemake_env: dict, user_env) -> Optional[str]:
+        """Build the full HTCondor ``environment`` submit value.
+
+        Merges the Snakemake-managed env vars (storage-plugin tokens, declared
+        ``--envvars``, etc.) with the user-supplied ``environment`` job resource,
+        and wraps the result in the outer double quotes that HTCondor's new
+        environment syntax requires.
+
+        Args:
+            snakemake_env: Dict of Snakemake-managed vars, serialized via
+                ``_format_htcondor_environment``.
+            user_env: The raw ``environment`` job resource, if any.  It must
+                already be a valid new-syntax body fragment (``NAME=value`` ...,
+                with embedded quotes escaped per the new-syntax rules) -- it is
+                appended verbatim, not escaped, and later assignments shadow
+                earlier ones (last assignment wins in HTCondor).
+
+        Returns:
+            The quoted ``environment`` value, or ``None`` if there is nothing to
+            set.
+        """
+        parts = []
+        if snakemake_env:
+            parts.append(self._format_htcondor_environment(snakemake_env))
+        if user_env:
+            parts.append(str(user_env))
+        if not parts:
+            return None
+        # The whole value must be wrapped in double quotes — without them
+        # HTCondor uses old syntax and values arrive wrapped in literal quotes
+        # (and break on spaces).
+        return '"' + " ".join(parts) + '"'
 
     def _format_size_mb(self, mb_value: int) -> str:
         """
@@ -905,6 +973,9 @@ class Executor(RemoteExecutor):
             for attr in ("script", "notebook"):
                 if value := getattr(rule, attr, None):
                     self.logger.debug(f"Processing {attr}: {value}")
+                    if getattr(rule, "basedir", None):
+                        resolved = str(rule.basedir.join(value))
+                        value = relpath(resolved, self.workflow.workdir_init)
                     self._add_file_if_transferable(
                         value,
                         transfer_input_files,
@@ -1106,6 +1177,81 @@ class Executor(RemoteExecutor):
         self.logger.debug(f"Config files to transfer: {config_paths_for_transfer}")
         return job_args, config_paths_for_transfer
 
+    def _strip_ap_local_path_args(self, job_args: str) -> str:
+        """
+        Drop absolute path arguments that resolve on the Access Point but are not
+        on a filesystem shared with the Execution Point.
+
+        Snakemake renders the spawned EP command on the AP and forwards several
+        location settings as absolute AP paths (e.g. ``--apptainer-prefix``, filled
+        from the inherited ``APPTAINER_CACHEDIR``, plus ``--conda-prefix``,
+        ``--shadow-prefix``, ``--directory``); those paths don't exist on the EP
+        and break the invocation. Rather than special-casing each setting, every
+        ``--flag <value>`` is judged purely by what the value is:
+
+        * not absolute, or under a configured shared-fs prefix -> reachable on the
+          EP (relative paths resolve under the job scratch dir; shared paths are
+          mounted on both) -> keep;
+        * does not resolve on the AP -> something the user expects elsewhere (baked
+          into their container, on CVMFS, node-local) -> keep;
+        * an AP-local directory, not shared -> a cache/scratch/workdir location ->
+          drop, so the EP falls back to its own default;
+        * an AP-local file, not shared -> unexpected here (content is passed as a
+          relative path or transferred separately) -> keep, but warn so a new leak
+          surfaces instead of breaking silently.
+
+        Only single-valued flags are considered, so list arguments (e.g.
+        ``--configfiles a b``) are never partially rewritten. Runs on the AP, and
+        only without a (fully) shared filesystem (the caller skips it otherwise).
+
+        Args:
+            job_args: The spawned-job argument string (prefix-stripped, sanitized).
+
+        Returns:
+            ``job_args`` with AP-local directory arguments removed.
+        """
+        tokens = job_args.split()
+        kept = []
+        i = 0
+        n = len(tokens)
+        while i < n:
+            flag = tokens[i]
+            value = tokens[i + 1] if i + 1 < n else None
+            after = tokens[i + 2] if i + 2 < n else None
+            # "--flag VALUE" where VALUE is not itself a flag and is followed by a
+            # flag or the end of the command. This guard means a list argument is
+            # never partially rewritten.
+            single_valued = (
+                flag.startswith("--")
+                and value is not None
+                and not value.startswith("--")
+                and (after is None or after.startswith("--"))
+            )
+            if single_valued and isabs(value):
+                if is_shared_fs(value, self.shared_fs_prefixes):
+                    pass  # mounted on both AP and EP -> reachable, keep
+                elif isdir(value):
+                    self.logger.debug(
+                        f"Dropping {flag} '{value}' from the spawned command: an "
+                        "Access-Point-local directory not on a shared filesystem, "
+                        "so it will not exist on the Execution Point. The Execution "
+                        "Point will use its own default location."
+                    )
+                    i += 2
+                    continue
+                elif exists(value):
+                    self.logger.warning(
+                        f"Argument {flag} '{value}' is an absolute Access-Point "
+                        "path not on a shared filesystem; it will not exist on the "
+                        "Execution Point. Leaving it in place; declare it via "
+                        "--htcondor-shared-fs-prefixes if it is in fact shared."
+                    )
+                # else: does not resolve on the AP (CVMFS, container-baked,
+                # node-local, or to be created on the EP) -> keep untouched.
+            kept.append(flag)
+            i += 1
+        return " ".join(kept)
+
     def _get_base_exec_and_args(self, job: JobExecutorInterface) -> tuple[str, str]:
         """
         Get the base executable and arguments for the HTCondor job.
@@ -1250,6 +1396,11 @@ class Executor(RemoteExecutor):
         # Add config files to the transfer input list
         transfer_input_files.extend(config_paths)
 
+        # Drop absolute path args that resolve on the AP but aren't on a shared
+        # filesystem: they are AP-local and won't exist on the EP. Paths not on the
+        # AP (CVMFS, container-baked, node-local) pass through unchanged.
+        job_args = self._strip_ap_local_path_args(job_args)
+
         self.logger.debug(f"Final arguments: {job_args}")
         self.logger.debug(
             f"Final transfer_input_files ({len(transfer_input_files)}): {transfer_input_files}"
@@ -1332,6 +1483,9 @@ class Executor(RemoteExecutor):
             "error": join(rule_log_dir, f"{rule_name}-{job.jobid}_$(ClusterId).err"),
             "request_cpus": str(job.threads),
         }
+        # Associate this job with its management id if there is one
+        if self._mgmt_id is not None:
+            submit_dict["+SnakeManagerJobId"] = self._mgmt_id
 
         # Supported universes for HTCondor
         supported_universes = [
@@ -1411,23 +1565,17 @@ class Executor(RemoteExecutor):
             ),
         )
 
-        # Build the HTCondor environment string by merging:
-        #   1. Snakemake-managed env vars (storage plugin tokens, etc.) from self.envvars()
-        #   2. Any extra env vars the user declared via the `environment` job resource
-        # Using HTCondor's native `environment` key is strictly better than
-        # embedding "export VAR=val &&" in the arguments string, which breaks
-        # the job_wrapper code path (the args string must start cleanly with
-        # "python -m snakemake" for prefix-stripping to succeed).
-        env_parts = []
-        snakemake_env = self.envvars()
-        if snakemake_env:
-            env_parts.append(self._format_htcondor_environment(snakemake_env))
-        if user_env := job.resources.get("environment"):
-            # User-provided value is appended after Snakemake vars; user values
-            # for the same key will shadow ours (last assignment wins in HTCondor).
-            env_parts.append(str(user_env))
-        if env_parts:
-            submit_dict["environment"] = " ".join(env_parts)
+        # Build the HTCondor environment string by merging Snakemake-managed env
+        # vars (storage plugin tokens, declared --envvars, etc.) with the user's
+        # `environment` job resource.  Using HTCondor's native `environment` key
+        # is strictly better than embedding "export VAR=val &&" in the arguments
+        # string, which breaks the job_wrapper code path (the args string must
+        # start cleanly with "python -m snakemake" for prefix-stripping).
+        env_value = self._assemble_environment(
+            self.envvars(), job.resources.get("environment")
+        )
+        if env_value is not None:
+            submit_dict["environment"] = env_value
 
         for key in ["input", "max_materialize", "max_idle"]:
             self._set_resources(submit_dict, job, key)
@@ -2392,6 +2540,11 @@ class Executor(RemoteExecutor):
         only read NEW events appended since the last read.
 
         """
+        # RemoteExecutor starts its status thread before calling __post_init__.
+        # Initialize the per-instance buffer defensively in case this method wins
+        # that race. setdefault also ensures __post_init__ preserves this object.
+        event_logs: Dict[int, list] = self.__dict__.setdefault("_event_logs", {})
+
         # Get the event log
         event_log = self._get_job_event_log()
 
@@ -2402,15 +2555,16 @@ class Executor(RemoteExecutor):
         # Get and organized all new events by their cluster_id
         for event in event_log.events(stop_after=0):
             clusterid = event.cluster
-            if clusterid not in self._event_logs:
+            if clusterid not in event_logs:
                 # Initialize
-                self._event_logs[clusterid] = []
+                event_logs[clusterid] = []
             # Append to existing job
-            self._event_logs[clusterid].append(event)
+            event_logs[clusterid].append(event)
 
     def cancel_jobs(self, active_jobs: List[SubmittedJobInfo]):
         # Cancel all active jobs.
         # This method is called when Snakemake is interrupted.
+        # Triggered only when Snakemake process was alive before the interruption.
 
         if active_jobs:
             schedd = htcondor.Schedd()
