@@ -83,6 +83,10 @@ def is_shared_fs(in_path, shared_prefixes) -> bool:
 # Default timeout in seconds for held jobs (4 hours).
 DEFAULT_HELD_TIMEOUT_SECONDS = 4 * 60 * 60
 
+# Value of --htcondor-metadata that writes the metadata file to its default
+# location in jobdir.
+METADATA_DEFAULT = "default"
+
 
 # Define additional settings for your executor.
 # They will occur in the Snakemake CLI as --<executor-name>-<param-name>
@@ -117,6 +121,21 @@ class ExecutorSettings(ExecutorSettingsBase):
             "(e.g., condor_release) before the workflow fails. "
             "Default is 4 hours (14400 seconds). Set to 0 to "
             "fail immediately when a job is held.",
+            "required": False,
+        },
+    )
+    metadata: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Write an HTCondor status metadata file (off by default). Pass "
+            f"'{METADATA_DEFAULT}' to write it to "
+            "<jobdir>/snakemake-metadata-<ClusterId>.json when running through the "
+            "htcondor snake submit command, otherwise to "
+            "<jobdir>/snakemake-metadata.json. Or pass a file path (absolute, or "
+            "relative to Snakemake's working directory); directories are not "
+            "accepted. If the file already exists, "
+            "it is kept as <name>.old.<N><ext> (next free N) and a new file is started. "
+            "Rollover assumes one run at a time per metadata path.",
             "required": False,
         },
     )
@@ -221,7 +240,7 @@ class Executor(RemoteExecutor):
         # Path to the unified log file that tracks all jobs submitted
         self._unified_log_file = join(self.jobDir, "snakemake-rules.log")
 
-        # Get mgmt_id from _condor_job_ad env variable and making it optional for those who just use condor_submit
+        # Get mgmt_id from _condor_job_ad env variable if it exists (local universe job)
         job_ad_path = os.environ.get("_CONDOR_JOB_AD")
         if job_ad_path:
             try:
@@ -231,23 +250,131 @@ class Executor(RemoteExecutor):
             except (OSError, KeyError, ValueError):
                 self._mgmt_id = None
 
-        self._metadata_file = None  # prevent AttributeError
+        self._metadata_file = self._resolve_metadata_file(
+            self.workflow.executor_settings.metadata
+        )
+
         self._metadata = {}  # prevent AttributeError
         self._metadata_dirty = False
-        if self._mgmt_id is not None:
-            self._metadata_file = join(
-                self.jobDir, f"snakemake-metadata-{self._mgmt_id}.json"
-            )
-
+        if self._metadata_file is not None:
+            # Keep a previous run's file instead of overwriting it
+            self._rollover_metadata_file(self._metadata_file)
             # Initial metadata with DAG information
             self._initialize_metadata(self._mgmt_id)
+            self._publish_metadata_path()
+            self.logger.info(f"HTCondor metadata file: {self._metadata_file}")
 
-    def _initialize_metadata(self, mgmt_id):
+    def _resolve_metadata_file(self, setting: Optional[str]) -> Optional[str]:
+        """
+        Resolve the --htcondor-metadata setting to an absolute metadata file path.
+
+        Args:
+            setting (str or None): None if the flag was not given, METADATA_DEFAULT
+                for the default location in jobDir, otherwise a user-supplied file
+                path (absolute, or relative to the working directory).
+
+        Returns:
+            str or None: Absolute path of the metadata file, or None if metadata
+            is disabled.
+
+        Raises:
+            WorkflowError: If the setting is a directory rather than a file path.
+        """
+        if setting is None:
+            return None
+
+        name = (
+            f"snakemake-metadata-{self._mgmt_id}.json"
+            if self._mgmt_id is not None
+            else "snakemake-metadata.json"
+        )
+
+        # Default file name inside jobDir
+        if setting == METADATA_DEFAULT:
+            return os.path.abspath(join(self.jobDir, name))
+
+        # Do not accept when only directory path is specified.
+        if setting.endswith(sep) or os.path.isdir(setting):
+            raise WorkflowError(
+                f"--htcondor-metadata expects a file path, but '{setting}' is a "
+                f"directory. Give a file name, e.g. "
+                f"'{join(setting, 'snakemake-metadata.json')}'."
+            )
+
+        # File path: make sure its parent directory exists
+        path = os.path.abspath(setting)
+        makedirs(os.path.dirname(path), exist_ok=True)
+        return path
+
+    def _rollover_metadata_file(self, path: str):
+        """
+        Keep an existing metadata file instead of overwriting it.
+
+        Renames `path` to the first free `<root>.old.<N><ext>`, e.g.
+        snakemake-metadata.json -> snakemake-metadata.old.1.json, so the new run
+        always writes to `path` and earlier runs' records are preserved.
+
+        Args:
+            path (str): Absolute path the new run will write its metadata to.
+
+        Raises:
+            WorkflowError: If the existing file cannot be renamed. Starting
+                anyway would overwrite the previous record.
+        """
+        if not os.path.exists(path):
+            return
+
+        root, ext = os.path.splitext(path)
+        n = 1
+        while os.path.exists(f"{root}.old.{n}{ext}"):
+            n += 1
+        rolled = f"{root}.old.{n}{ext}"
+
+        try:
+            os.rename(path, rolled)
+        except OSError as e:
+            raise WorkflowError(
+                f"Metadata file {path} already exists, and renaming it to {rolled}"
+                f" failed: {e}. Move or remove the old file, or pass a different path with "
+                "--htcondor-metadata."
+            )
+        self.logger.info(f"Previous metadata file kept as {rolled}")
+
+    def _publish_metadata_path(self):
+        """
+        Set the HTCondorSnakeMetadata attribute on the management job's ClassAd.
+
+        Points `htcondor snake status <mgmt_id>` at the resolved metadata file.
+        Done here rather than at submit time so the pointer always matches the
+        path the executor actually writes, including user-supplied paths.
+        Does nothing when not running as a management job (no mgmt_id).
+
+        Returns:
+            None
+        """
+        if self._mgmt_id is None:
+            return
+        try:
+            htcondor.Schedd().edit(
+                self._mgmt_id,
+                "HTCondorSnakeMetadata",
+                classad.quote(self._metadata_file),
+            )
+
+        except Exception as e:
+            self.logger.warning(
+                f"Could not set HTCondorSnakeMetadata on management job "
+                f"{self._mgmt_id}; 'htcondor snake status' will not find the "
+                f"metadata file: {e}"
+            )
+
+    def _initialize_metadata(self, mgmt_id=None):
         """
         Initialize metadata (DAG-level metadata) for monitoring jobs
 
         Args:
-            mgmt_id (int): Management/job id (ClusterId), which represents the local universe job, used to name the metadata file
+            mgmt_id (int or None): ClusterId of the management job, or None when run by hand.
+                When set, mgmt_job_id and mgmt_job_name are included.
 
         Returns:
             None
@@ -256,16 +383,26 @@ class Executor(RemoteExecutor):
         """
         dags = self.workflow.dag
 
-        self._metadata = {
-            "mgmt_job_id": mgmt_id,
-            "mgmt_job_name": f"snakemake-mgmt-{mgmt_id}" if mgmt_id else None,
-            "submitted_at": time.time(),
-            "total_nodes": len(dags.jobs),  # total DAG size
-            "executable_nodes": len(
-                [job for job in dags.needrun_jobs() if not job.is_local]
-            ),  # nodes that are executable, not target rules and local rules
-            "jobs": {},  # populated as per-node job records are submitted
-        }
+        if mgmt_id is not None:
+            self._metadata = {
+                "mgmt_job_id": mgmt_id,
+                "mgmt_job_name": f"snakemake-mgmt-{mgmt_id}",
+                "started_at": time.time(),  # when the executor is started
+                "total_nodes": len(dags.jobs),  # total DAG size
+                "executable_nodes": len(
+                    [job for job in dags.needrun_jobs() if not job.is_local]
+                ),  # nodes that are executable, not target rules and local rules
+                "jobs": {},  # populated as per-node job records are submitted
+            }
+        else:
+            self._metadata = {
+                "started_at": time.time(),
+                "total_nodes": len(dags.jobs),  # total DAG size
+                "executable_nodes": len(
+                    [job for job in dags.needrun_jobs() if not job.is_local]
+                ),  # nodes that are executable, not target rules and local rules
+                "jobs": {},  # populated as per-node job records are submitted
+            }
         self._write_metadata()
 
     def _write_metadata(self):
@@ -1389,12 +1526,19 @@ class Executor(RemoteExecutor):
 
         # Store one metadata record per Snakemake node so grouped and
         # non-grouped jobs share the same status shape, making query simpler
-        if self._mgmt_id is not None:
+        if self._metadata_file is not None:
             submitted_jobs = (
                 job.jobs if job.is_group() and hasattr(job, "jobs") else [job]
             )
-            for j in submitted_jobs:
-                self._add_job_to_metadata(cluster_id, j, grouped=job.is_group())
+            try:
+                for j in submitted_jobs:
+                    self._add_job_to_metadata(cluster_id, j, grouped=job.is_group())
+            except Exception as e:
+                self._metadata_dirty = True
+                self.logger.warning(
+                    f"Failed to record HTCondor Cluster ID {cluster_id} in metadata "
+                    f"file {self._metadata_file}: {e}"
+                )
 
     def _add_job_to_metadata(
         self, cluster_id, job: JobExecutorInterface, grouped: bool = False
@@ -1420,6 +1564,16 @@ class Executor(RemoteExecutor):
         # under the same HTCondor cluster without overwriting each other.
         job_key = f"{cluster_id}:{job.jobid}"
 
+        # A retry resubmits the same node under a new cluster id.
+        # We will have the same jobid but different clusterid, so we need to update the
+        # record so status command will not double count
+        for stale_key in [
+            key
+            for key, data in self._metadata["jobs"].items()
+            if data.get("jobid") == job.jobid
+        ]:
+            del self._metadata["jobs"][stale_key]
+
         # Initialize/add this job's information to the metadata's job key
         self._metadata["jobs"][job_key] = {
             "cluster_id": cluster_id,
@@ -1428,16 +1582,20 @@ class Executor(RemoteExecutor):
             "display_name": f"{job.name}-{job.jobid}",
             "grouped": grouped,
             "status": JobStatus.IDLE.value,  # initial status
+            # Set once the job terminates. As in HTCondor, "completed" only means
+            # the job finished; these say whether it succeeded.
+            "exit_code": None,  # only 0 means success
+            "exit_signal": None,  # only set when exit_by_signal is True, which means the job was killed
             "submitted_at": time.time(),
             "last_updated": time.time(),
         }
 
         self._write_metadata()
 
-    def _update_job_status_in_metadata(self, cluster_id, new_status: JobStatus):
+    def _update_job_status_in_metadata(self, cluster_id, job_state: JobState):
         """
-        Update status and timestamp in-memory for metadata entries matching
-        `cluster_id`, if their status actually changed.
+        Update status, exit information and timestamp in-memory for metadata
+        entries matching `cluster_id`, if any of them actually changed.
 
         Reflect lifecycle events of a node. Avoid expensive schedd query.
         Marks self._metadata_dirty so the caller's polling cycle can flush once
@@ -1446,18 +1604,24 @@ class Executor(RemoteExecutor):
 
         Args:
             cluster_id (int): HTCondor cluster id whose job entries should be updated.
-            new_status (JobStatus): New status value
+            job_state (JobState): Current state of the job
 
         Returns:
             None
         """
+        exit_signal = job_state.exit_signal if job_state.exit_by_signal else None
         updated_at = time.time()
         for job_data in self._metadata["jobs"].values():
+            if job_data.get("cluster_id") != cluster_id:
+                continue
             if (
-                job_data.get("cluster_id") == cluster_id
-                and job_data.get("status") != new_status.value
+                job_data.get("status") != job_state.status.value
+                or job_data.get("exit_code") != job_state.exit_code
+                or job_data.get("exit_signal") != exit_signal
             ):
-                job_data["status"] = new_status.value
+                job_data["status"] = job_state.status.value
+                job_data["exit_code"] = job_state.exit_code
+                job_data["exit_signal"] = exit_signal
                 job_data["last_updated"] = updated_at
                 self._metadata_dirty = True
 
@@ -1888,12 +2052,10 @@ class Executor(RemoteExecutor):
             )
 
             # If the status changed as a result of processing events, persist it to metadata
-            if self._mgmt_id is not None:
+            if self._metadata_file is not None:
                 try:
                     if current_state.status != previous_status:
-                        self._update_job_status_in_metadata(
-                            cluster_id, current_state.status
-                        )
+                        self._update_job_status_in_metadata(cluster_id, current_state)
                 except Exception:
                     self.logger.debug(
                         f"Failed to update metadata for cluster {cluster_id} after reading events"
@@ -2104,10 +2266,10 @@ class Executor(RemoteExecutor):
 
                     if job_state is not None:
                         # Got state from log - update metadata and process it immediately
-                        if self._mgmt_id is not None:
+                        if self._metadata_file is not None:
                             try:
                                 self._update_job_status_in_metadata(
-                                    cluster_id, job_state.status
+                                    cluster_id, job_state
                                 )
                             except Exception:
                                 # Don't let metadata update failures prevent normal processing
@@ -2164,10 +2326,8 @@ class Executor(RemoteExecutor):
                     self._job_current_states[cluster_id] = job_state
                     result = self._report_and_resolve_job_state(current_job, job_state)
                     # Update metadata
-                    if self._mgmt_id is not None:
-                        self._update_job_status_in_metadata(
-                            cluster_id, job_state.status
-                        )
+                    if self._metadata_file is not None:
+                        self._update_job_status_in_metadata(cluster_id, job_state)
                     if result is not None:
                         yield result
                 else:
@@ -2189,10 +2349,8 @@ class Executor(RemoteExecutor):
                     self._job_current_states[cluster_id] = job_state
                     result = self._report_and_resolve_job_state(current_job, job_state)
                     # Update metadata
-                    if self._mgmt_id is not None:
-                        self._update_job_status_in_metadata(
-                            cluster_id, job_state.status
-                        )
+                    if self._metadata_file is not None:
+                        self._update_job_status_in_metadata(cluster_id, job_state)
                     if result is not None:
                         yield result
                 else:
@@ -2213,7 +2371,7 @@ class Executor(RemoteExecutor):
             raise
         finally:
             # Flush once per cycle instead of writing the metadata file on every single status update.
-            if self._mgmt_id is not None:
+            if self._metadata_file is not None:
                 try:
                     self._flush_metadata_if_dirty()
                 except Exception:
@@ -2263,6 +2421,20 @@ class Executor(RemoteExecutor):
                 schedd.act(htcondor.JobAction.Remove, job_ids)
             except Exception as e:
                 self.logger.warning(f"Failed to cancel HTCondor jobs: {e}")
+            else:
+                # No polling cycle follows a cancel, so flush here
+                if self._metadata_file is not None:
+                    try:
+                        for current_job in active_jobs:
+                            self._update_job_status_in_metadata(
+                                current_job.external_jobid,
+                                JobState(status=JobStatus.REMOVED),
+                            )
+                        self._flush_metadata_if_dirty()
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to mark cancelled jobs as removed in metadata: {e}"
+                        )
 
         # Close the unified event log reader to release the OS file descriptor
         if self._unified_event_log_reader is not None:
