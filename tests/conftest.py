@@ -3,11 +3,12 @@ Shared test fixtures and utilities for HTCondor executor tests.
 """
 
 from contextlib import contextmanager
+from typing import Optional
 from unittest.mock import Mock, patch
 import os
 
 import snakemake_executor_plugin_htcondor as plugin
-from snakemake_executor_plugin_htcondor import Executor
+from snakemake_executor_plugin_htcondor import Executor, METADATA_DEFAULT
 
 
 def create_mock_executor(shared_fs_prefixes=None):
@@ -51,7 +52,7 @@ def create_mock_submit_executor(tmp_path):
     executor.envvars = Mock(return_value={})
     executor.report_job_submission = Mock()
     executor._unified_log_file = str(tmp_path / "snakemake-rules.log")
-    executor._mgmt_id = None
+    executor._metadata_file = None
 
     executor.run_job = Executor.run_job.__get__(executor, Executor)
     executor._set_resources = Executor._set_resources.__get__(executor, Executor)
@@ -221,35 +222,51 @@ def create_mock_group_job(
 
 
 def create_mock_metadata_executor(
-    tmp_path, mgmt_id=12345, total_nodes=5, executable_nodes=4
+    tmp_path,
+    mgmt_id: Optional[int] = 12345,
+    total_nodes: int = 5,
+    executable_nodes: int = 4,
+    metadata: Optional[str] = METADATA_DEFAULT,
+    schedd=None,
 ):
     """
     Create a mock executor configured for metadata file tests.
 
     This builds on create_mock_submit_executor and adds what run_job's metadata path
-    depends on.
+    depends on. It mirrors the metadata setup in Executor.__post_init__
+    (resolve -> rollover -> initialize -> publish).
 
     Args:
         tmp_path: pytest tmp_path fixture value.
-        mgmt_id: cluster_id of local universe management job. otherwise, None.
+        mgmt_id: ClusterId of the local universe management job, or None when
+            Snakemake is run by hand.
         total_nodes: size of workflow.dag.jobs
         executable_nodes: count of non-local needrun jobs (actually get submitted to the EP).
+        metadata: value of --htcondor-metadata. None disables metadata,
+            METADATA_DEFAULT writes to jobDir, otherwise a file path.
+        schedd: mock returned by htcondor.Schedd(), so tests can assert on
+            _publish_metadata_path's edit call. A fresh Mock is used if None.
 
     Returns:
-        Mock executor with metadata methods bound and (if mgmt_id is set) initial metadata
-        already written.
-
+        Mock executor with metadata methods bound. If metadata is enabled, any
+        existing file at the resolved path has been rolled over and the initial
+        metadata written.
     """
+    # bind real run_job and stubs to everything else it needs
     executor = create_mock_submit_executor(tmp_path)
 
     os.makedirs(executor.jobDir, exist_ok=True)
 
+    # bind all relevant methods to creating and updating metadata file
     for method_name in (
         "_initialize_metadata",
         "_write_metadata",
         "_add_job_to_metadata",
         "_update_job_status_in_metadata",
         "_flush_metadata_if_dirty",
+        "_resolve_metadata_file",
+        "_rollover_metadata_file",
+        "_publish_metadata_path",
     ):
         method = getattr(Executor, method_name)
         setattr(executor, method_name, method.__get__(executor, Executor))
@@ -257,16 +274,23 @@ def create_mock_metadata_executor(
     executor._mgmt_id = mgmt_id
     executor._metadata = {}
     executor._metadata_dirty = False
-    executor._metadata_file = None
 
-    if mgmt_id is not None:
-        executor._metadata_file = os.path.join(
-            executor.jobDir, f"snakemake-metadata-{mgmt_id}.json"
-        )
-        executor.workflow.dag = Mock()
-        executor.workflow.dag.jobs = [Mock() for _ in range(total_nodes)]
-        executor.workflow.dag.needrun_jobs = Mock(
-            return_value=[Mock(is_local=False) for _ in range(executable_nodes)]
-        )
-        executor._initialize_metadata(mgmt_id)  # mirrors what __init__ does
+    # resolve the --htcondor-metadata setting to the absolute path it is written to
+    executor._metadata_file = executor._resolve_metadata_file(metadata)
+
+    # workflow.dag setup for _initialize_metadata
+    executor.workflow.dag = Mock()
+    executor.workflow.dag.jobs = [Mock() for _ in range(total_nodes)]
+    executor.workflow.dag.needrun_jobs = Mock(
+        return_value=[Mock(is_local=False) for _ in range(executable_nodes)]
+    )
+
+    if executor._metadata_file is not None:
+        executor._rollover_metadata_file(executor._metadata_file)
+        executor._initialize_metadata(mgmt_id)
+
+        schedd = schedd or Mock()
+        with patch.object(plugin.htcondor, "Schedd", return_value=schedd):
+            executor._publish_metadata_path()
+
     return executor
